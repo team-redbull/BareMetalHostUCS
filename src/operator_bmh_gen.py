@@ -15,6 +15,7 @@ from src.buffer_manager import BufferManager
 from src.openshift_utils import OpenShiftUtils
 from src.yaml_generators import YamlGenerator
 from src.unified_server_client import UnifiedServerClient, initialize_unified_client
+from src.bmhgen_value_resolver import resolve_server_vendor, resolve_vlan_id
 from src.config import operator_logger, buffer_logger, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase
 
 # Initialize YAML generator
@@ -206,10 +207,31 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
     metadata = kwargs.get('metadata', {})
     operator_logger.info(f"Metadata for BMHG {name}: {metadata}")
 
-    server_vendor = annotations.get('server_vendor') if annotations else None
-    vlan_id = annotations.get('vlanId') if annotations else None
+    try:
+        server_vendor = resolve_server_vendor(spec, annotations)
+        vlan_id = resolve_vlan_id(spec, annotations)
+    except ValueError as e:
+        operator_logger.error(f"[CREATE] CR field validation failed for {name}: {e}")
+        patch.status["phase"] = Phase.FAILED
+        patch.status["message"] = str(e)
+        raise kopf.PermanentError(str(e))
 
-    operator_logger.info(f"Server vendor annotation: {server_vendor}")
+    if server_vendor:
+        vendor_source = "spec" if spec.get('server_vendor') else "annotation"
+        vendor_msg = f"{server_vendor!r} (from {vendor_source})"
+    else:
+        vendor_msg = "not specified — will auto-detect from server name"
+
+    if vlan_id:
+        vlan_source = "spec" if (spec.get('network') or {}).get('vlanId') is not None else "annotation"
+        vlan_msg = f"{vlan_id!r} (from {vlan_source})"
+    else:
+        vlan_msg = "not specified"
+
+    operator_logger.info(
+        f"[CREATE] Resolved fields for {name}: "
+        f"server_vendor={vendor_msg}, vlan_id={vlan_msg}"
+    )
 
     if not infra_env:
         # Update status before raising error using kopf's patch mechanism
@@ -423,7 +445,7 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
 
         # Step 2: Re-query server info from management system
         server_name = spec.get('serverName', name)
-        server_vendor = annotations.get('server_vendor') if annotations else None
+        server_vendor = resolve_server_vendor(spec, annotations)
 
         operator_logger.info(f"[REDEPLOY] Querying server info for: {server_name}")
 
@@ -556,7 +578,7 @@ async def create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
     target_namespace = spec.get('namespace', namespace)
     infra_env = spec.get('infraEnv')
     labels = spec.get('labels', {})
-    vlan_id = annotations.get('vlanId') if annotations else None
+    vlan_id = resolve_vlan_id(spec, annotations)
 
     operator_logger.info(f"[REDEPLOY] Creating resources in namespace: {target_namespace}")
 

@@ -31,6 +31,19 @@ spec:
                 additionalProperties:
                   type: string
                 description: "Additional labels to apply to the BareMetalHost"
+              server_vendor:
+                type: string
+                pattern: "(?i)^(HP|DELL|CISCO)$"
+                description: "Server vendor type: HP, DELL, or CISCO (case-insensitive). Takes priority over the server_vendor annotation."
+              network:
+                type: object
+                description: "Network configuration for the BareMetalHost"
+                properties:
+                  vlanId:
+                    type: integer
+                    minimum: 1
+                    maximum: 4094
+                    description: "VLAN ID for network configuration (1-4094). Takes priority over the vlanId annotation."
           status:
             type: object
             properties:
