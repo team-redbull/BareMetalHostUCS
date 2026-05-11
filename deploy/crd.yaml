@@ -71,7 +71,6 @@ spec:
                 description: "Namespace of the created BareMetalHost resource"
               serverVendor:
                 type: string
-                enum: ["HP", "DELL", "CISCO"]
                 description: "Server vendor type detected or specified"
               vlanId:
                 type: string

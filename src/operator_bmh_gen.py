@@ -209,9 +209,6 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
     # Read server_vendor and vlanId exclusively from spec.
     # The CRD OpenAPI schema validates accepted values — no additional runtime validation needed.
     server_vendor = spec.get('server_vendor')
-    if server_vendor:
-        server_vendor = server_vendor.strip().upper()
-
     vlan_id = (spec.get('network') or {}).get('vlanId')
     vlan_id = str(vlan_id) if vlan_id is not None else None
 
@@ -435,8 +432,6 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
         # Step 2: Re-query server info from management system
         server_name = spec.get('serverName', name)
         server_vendor = spec.get('server_vendor')
-        if server_vendor:
-            server_vendor = server_vendor.strip().upper()
 
         operator_logger.info(f"[REDEPLOY] Querying server info for: {server_name}")
 
