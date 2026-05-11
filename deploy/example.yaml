@@ -1,9 +1,4 @@
-# ============================================================
-# OPTION A: vendor and VLAN specified via spec (recommended)
-# spec fields take priority over annotations when both are set.
-# ============================================================
-
-# Example 1a: HP Server — vendor in spec
+# Example 1: HP Server
 apiVersion: infra.example.com/v1alpha1
 kind: BareMetalHostGenerator
 metadata:
@@ -12,10 +7,10 @@ metadata:
 spec:
   serverName: ocp4-roi-rf-compute-01  # Server name in HP OneView
   infraEnv: "ocp4-roi-infraenv"        # Required: InfraEnv for agent-based installation
-  server_vendor: HP                    # HP, DELL, or CISCO
+  server_vendor: HP                    # HP, DELL, or CISCO (case-insensitive)
 
 ---
-# Example 2a: Dell Server with VLAN — vendor and VLAN in spec
+# Example 2: Dell Server with VLAN
 apiVersion: infra.example.com/v1alpha1
 kind: BareMetalHostGenerator
 metadata:
@@ -26,10 +21,10 @@ spec:
   infraEnv: "classic-baremetal"      # Required: InfraEnv name
   server_vendor: DELL
   network:
-    vlanId: 24                       # Integer, 1-4094; required for Dell VLAN config
+    vlanId: 24                       # Integer, 1-4094; triggers NMStateConfig creation
 
 ---
-# Example 3a: Cisco UCS Server — vendor in spec
+# Example 3: Cisco UCS Server
 apiVersion: infra.example.com/v1alpha1
 kind: BareMetalHostGenerator
 metadata:
@@ -43,36 +38,3 @@ spec:
   labels:                            # Optional: additional labels for BareMetalHost
     environment: "production"
     cluster: "my-cluster"
-
----
-# ============================================================
-# OPTION B: vendor and VLAN specified via annotations (legacy)
-# Fully supported for backwards compatibility.
-# If both spec fields and annotations are set, spec wins.
-# ============================================================
-
-# Example 1b: HP Server — vendor in annotation
-apiVersion: infra.example.com/v1alpha1
-kind: BareMetalHostGenerator
-metadata:
-  name: hp-server-02
-  namespace: openshift-machine-api
-  annotations:
-    server_vendor: "HP"
-spec:
-  serverName: ocp4-roi-rf-compute-02
-  infraEnv: "ocp4-roi-infraenv"
-
----
-# Example 2b: Dell Server with VLAN — vendor and VLAN in annotations
-apiVersion: infra.example.com/v1alpha1
-kind: BareMetalHostGenerator
-metadata:
-  name: dell-server-02
-  namespace: inventory
-  annotations:
-    server_vendor: "DELL"
-    vlanId: "24"                     # String when specified as annotation
-spec:
-  serverName: ocp4-test2
-  infraEnv: "classic-baremetal"

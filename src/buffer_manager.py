@@ -182,20 +182,11 @@ class BufferManager:
             server_vendor = status.get('serverVendor')
 
             if not server_vendor:
-                annotations = bmhgen.get('metadata', {}).get('annotations', {})
-                server_vendor = annotations.get('server_vendor')
-                if not server_vendor:
-                    # Fallback to default detection logic
-                    from src.server_strategy import ServerTypeDetector
-                    detected_type = ServerTypeDetector.detect(name)
-                    server_vendor = detected_type.value.upper()
+                from src.server_strategy import ServerTypeDetector
+                detected_type = ServerTypeDetector.detect(name)
+                server_vendor = detected_type.value.upper()
 
             vlan_id = status.get('vlanId')
-            if not vlan_id and server_vendor.upper() != 'DELL':
-                annotations = bmhgen.get('metadata', {}).get('annotations', {})
-                vlan_id = annotations.get('vlanId')
-                if not vlan_id:
-                    vlan_id = ""
 
             if not mac_address or not ipmi_address:
                 self.buffer_logger.error(f"Missing server info for buffered generator {name}")
