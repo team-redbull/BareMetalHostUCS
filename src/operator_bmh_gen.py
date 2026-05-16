@@ -206,10 +206,18 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
     metadata = kwargs.get('metadata', {})
     operator_logger.info(f"Metadata for BMHG {name}: {metadata}")
 
-    server_vendor = annotations.get('server_vendor') if annotations else None
-    vlan_id = annotations.get('vlanId') if annotations else None
+    # Read server_vendor and vlanId exclusively from spec.
+    # The CRD OpenAPI schema validates accepted values — no additional runtime validation needed.
+    server_vendor = spec.get('server_vendor')
+    vlan_id = (spec.get('network') or {}).get('vlanId')
+    vlan_id = str(vlan_id) if vlan_id is not None else None
 
-    operator_logger.info(f"Server vendor annotation: {server_vendor}")
+    vendor_msg = f"{server_vendor!r}" if server_vendor else "not specified — will auto-detect from server name"
+    vlan_msg = f"{vlan_id!r}" if vlan_id else "not specified"
+    operator_logger.info(
+        f"[CREATE] Resolved fields for {name}: "
+        f"server_vendor={vendor_msg}, vlan_id={vlan_msg}"
+    )
 
     if not infra_env:
         # Update status before raising error using kopf's patch mechanism
@@ -423,7 +431,7 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
 
         # Step 2: Re-query server info from management system
         server_name = spec.get('serverName', name)
-        server_vendor = annotations.get('server_vendor') if annotations else None
+        server_vendor = spec.get('server_vendor')
 
         operator_logger.info(f"[REDEPLOY] Querying server info for: {server_name}")
 
@@ -551,12 +559,13 @@ async def create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
     """
     Create BMH, Secret, and NMStateConfig resources.
 
-    Note: NMStateConfig is only created for Dell servers with vlanId annotation
+    Note: NMStateConfig is only created for Dell servers when spec.network.vlanId is set.
     """
     target_namespace = spec.get('namespace', namespace)
     infra_env = spec.get('infraEnv')
     labels = spec.get('labels', {})
-    vlan_id = annotations.get('vlanId') if annotations else None
+    vlan_id = (spec.get('network') or {}).get('vlanId')
+    vlan_id = str(vlan_id) if vlan_id is not None else None
 
     operator_logger.info(f"[REDEPLOY] Creating resources in namespace: {target_namespace}")
 

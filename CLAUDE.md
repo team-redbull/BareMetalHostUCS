@@ -57,10 +57,11 @@ This is a Kubernetes operator that automatically creates BareMetalHost resources
 ### Vendor Detection Logic
 
 The operator detects server vendor in this priority order:
-1. **Explicit annotation**: `server_vendor: "HP"` (recommended)
-2. **Name-based heuristics**:
-   - Contains 'rf' → HP
-   - Contains 'ome' → Dell
+1. **`spec.server_vendor`**: `HP`, `DELL`, or `CISCO` (case-insensitive; validated by CRD schema)
+2. **Name-based heuristics** (when `spec.server_vendor` is omitted):
+   - Contains `hp` → HP
+   - Contains `dell` → Dell
+   - Contains `cisco` → Cisco
    - Default → Cisco
 
 ### Custom Resource Definition
@@ -76,7 +77,8 @@ The operator detects server vendor in this priority order:
 - `spec.serverName`: Server name in management system (defaults to CR name)
 - `spec.namespace`: Target namespace (defaults to current)
 - `spec.labels`: Additional labels for BareMetalHost
-- `metadata.annotations.server_vendor`: Explicit vendor (HP/Dell/Cisco)
+- `spec.server_vendor`: Explicit vendor — `HP`, `DELL`, or `CISCO` (case-insensitive)
+- `spec.network.vlanId`: VLAN ID integer (1–4094); triggers NMStateConfig creation for Dell servers
 
 ### Status Phases
 
@@ -271,7 +273,7 @@ The operator interacts with:
 
 ### Server Not Found
 - Verify server name matches exactly (case-insensitive comparison is used)
-- Check `server_vendor` annotation is correct
+- Check `spec.server_vendor` is set correctly (HP, DELL, or CISCO)
 - Ensure management system credentials are valid
 - Check operator logs for connection errors
 

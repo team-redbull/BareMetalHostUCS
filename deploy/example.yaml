@@ -4,11 +4,10 @@ kind: BareMetalHostGenerator
 metadata:
   name: hp-server-01
   namespace: openshift-machine-api
-  annotations:
-    server_vendor: "HP"  # Specify vendor: HP, DELL, or CISCO
 spec:
   serverName: ocp4-roi-rf-compute-01  # Server name in HP OneView
   infraEnv: "ocp4-roi-infraenv"        # Required: InfraEnv for agent-based installation
+  server_vendor: HP                    # HP, DELL, or CISCO (case-insensitive)
 
 ---
 # Example 2: Dell Server with VLAN
@@ -17,12 +16,12 @@ kind: BareMetalHostGenerator
 metadata:
   name: dell-server-01
   namespace: inventory
-  annotations:
-    server_vendor: "DELL"  # Specify vendor
-    vlanId: "24"           # Required for Dell servers - VLAN ID for network configuration
 spec:
-  serverName: ocp4-test1           # Server name in Dell OME
-  infraEnv: "classic-baremetal"    # Required: InfraEnv name
+  serverName: ocp4-test1             # Server name in Dell OME
+  infraEnv: "classic-baremetal"      # Required: InfraEnv name
+  server_vendor: DELL
+  network:
+    vlanId: 24                       # Integer, 1-4094; triggers NMStateConfig creation
 
 ---
 # Example 3: Cisco UCS Server
@@ -31,12 +30,11 @@ kind: BareMetalHostGenerator
 metadata:
   name: cisco-server-01
   namespace: default
-  annotations:
-    server_vendor: "CISCO"  # Specify vendor
 spec:
-  serverName: "my-ucs-server"  # Server name in UCS Central
-  namespace: "baremetal"        # Optional: target namespace for BareMetalHost
-  infraEnv: "my-infraenv"       # Required: InfraEnv name
-  labels:                       # Optional: additional labels for BareMetalHost
+  serverName: "my-ucs-server"        # Server name in UCS Central
+  namespace: "baremetal"             # Optional: target namespace for BareMetalHost
+  infraEnv: "my-infraenv"            # Required: InfraEnv name
+  server_vendor: CISCO
+  labels:                            # Optional: additional labels for BareMetalHost
     environment: "production"
     cluster: "my-cluster"

@@ -49,36 +49,34 @@ class ServerStrategy(ABC):
         self._cache = None
     
 class ServerTypeDetector:
-    @staticmethod
-    def detect(server_name: str, server_vendor: Optional[str] = None) -> ServerType:
+    # Ordered list of (substring, ServerType) checked against the lowercase server name.
+    # First match wins. Extend this list to support new naming conventions.
+    _NAME_PATTERNS = [
+        ("hp",    ServerType.HP),
+        ("dell",  ServerType.DELL),
+        ("cisco", ServerType.CISCO),
+    ]
+    _DEFAULT_TYPE = ServerType.CISCO
+
+    @classmethod
+    def detect(cls, server_name: str, server_vendor: Optional[str] = None) -> ServerType:
         if server_vendor:
-            server_vendor = server_vendor.strip()
-            logger.debug(f"Server vendor provided: {server_vendor}")
-            vendor_upper = server_vendor.upper()
-            logger.debug(f"Server vendor upper case: {vendor_upper}")
-            
-            if vendor_upper == "HP":
-                logger.debug("Detected server type: HP")
-                return ServerType.HP
-            elif vendor_upper == "DELL":
-                logger.debug("Detected server type: DELL")
-                return ServerType.DELL
-            elif vendor_upper == "CISCO":
-                logger.debug("Detected server type: CISCO")
-                return ServerType.CISCO
-            else:
-                logger.info("Server vendor not recognized, falling back to auto-detection.")
-        
+            vendor_upper = server_vendor.strip().upper()
+            logger.debug(f"Server vendor provided: {vendor_upper}")
+            for _, server_type in cls._NAME_PATTERNS:
+                if server_type.name == vendor_upper:
+                    logger.debug(f"Detected server type from vendor: {server_type.name}")
+                    return server_type
+            logger.info(f"Server vendor {vendor_upper!r} not recognized, falling back to name-based detection.")
+
         server_name_lower = server_name.lower()
-        if "rf" in server_name_lower:
-            logger.debug("Detected server type: HP based on server name.")
-            return ServerType.HP
-        elif "ome" in server_name_lower:
-            logger.debug("Detected server type: DELL based on server name.")
-            return ServerType.DELL
-        else:
-            logger.debug("Defaulting to CISCO server type.")
-            return ServerType.CISCO
+        for keyword, server_type in cls._NAME_PATTERNS:
+            if keyword in server_name_lower:
+                logger.debug(f"Detected server type {server_type.name!r} from server name (matched {keyword!r}).")
+                return server_type
+
+        logger.debug(f"No name pattern matched, defaulting to {cls._DEFAULT_TYPE.name}.")
+        return cls._DEFAULT_TYPE
 
 class ServerStrategyFactory:
     # Lazy import to avoid circular dependency
