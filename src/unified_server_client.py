@@ -94,11 +94,12 @@ class UnifiedServerClient:
             ServerType.CISCO: [ServerType.CISCO, ServerType.DELL, ServerType.HP]
         }
         return search_priority.get(detected_type, [ServerType.DELL, ServerType.CISCO, ServerType.HP])
-    def get_server_info(self, server_name: str, server_vendor: Optional[str] = None) -> Tuple[str, str]:
+    def get_server_info(self, server_name: str, server_vendor: Optional[str] = None,
+                        mac_index_override: Optional[str] = None) -> Tuple[str, str]:
         logger.info(f"Retrieving server info for: {server_name}")
         detected_type = self._detector.detect(server_name, server_vendor)
         search_order = self._get_search_order(detected_type, server_vendor)
-        try: 
+        try:
             for server_type in search_order:
                 strategy = self._strategies.get(server_type)
                 if not strategy:
@@ -106,14 +107,19 @@ class UnifiedServerClient:
                     continue
                 try:
                     logger.info(f"Searching in {server_type.value} system")
-                    mac, ip = strategy.get_server_info(server_name)
+                    # mac_index_override only applies to Dell; HP/Cisco strategies
+                    # have their own fixed MAC selection logic and ignore it.
+                    if server_type == ServerType.DELL:
+                        mac, ip = strategy.get_server_info(server_name, mac_index_override)
+                    else:
+                        mac, ip = strategy.get_server_info(server_name)
                     if mac and ip:
                         logger.info(f"Found server in {server_type.value} system with {ip},{mac}")
                         self.disconnect()
                         return mac, ip
                 except Exception as e:
-                        logger.warning(f"Error searching in {server_type.value} system: {str(e)}")
-                        continue
+                    logger.warning(f"Error searching in {server_type.value} system: {str(e)}")
+                    continue
             self.disconnect()
             raise ValueError(f"Server {server_name} not found in any configured system")
         except Exception as e:

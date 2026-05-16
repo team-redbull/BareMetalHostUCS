@@ -31,6 +31,16 @@ spec:
                 additionalProperties:
                   type: string
                 description: "Additional labels to apply to the BareMetalHost"
+              networkConfig:
+                type: object
+                description: "Optional per-host NIC and MAC overrides. Both fields must be provided together."
+                properties:
+                  nicName:
+                    type: string
+                    description: "Network interface name (e.g. ens8f0np0). Overrides server profile lookup."
+                  macIndex:
+                    type: string
+                    description: "MAC address selection — 'first', 'last', or 0-based integer (e.g. '2'). Overrides server profile lookup."
           status:
             type: object
             properties:
@@ -58,11 +68,16 @@ spec:
                 description: "Namespace of the created BareMetalHost resource"
               serverVendor:
                 type: string
-                enum: ["HP", "DELL", "CISCO"]
-                description: "Server vendor type detected or specified"
+                description: "Server vendor type detected or specified (HP, DELL, CISCO)"
               vlanId:
                 type: string
                 description: "VLAN ID for Dell servers"
+              selectedNicName:
+                type: string
+                description: "Effective NIC name used for this host (from spec.networkConfig or server profile)"
+              selectedMacIndex:
+                type: string
+                description: "Effective MAC index used for this host (from spec.networkConfig or server profile)"
     subresources:
       status: {}
     additionalPrinterColumns:

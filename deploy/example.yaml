@@ -25,7 +25,24 @@ spec:
   infraEnv: "classic-baremetal"    # Required: InfraEnv name
 
 ---
-# Example 3: Cisco UCS Server
+# Example 3: Dell Server with networkConfig override (bypass profile lookup for this host)
+apiVersion: infra.example.com/v1alpha1
+kind: BareMetalHostGenerator
+metadata:
+  name: dell-special-01
+  namespace: inventory
+  annotations:
+    server_vendor: "DELL"
+    vlanId: "24"
+spec:
+  serverName: ocp4-special-node     # Server name in Dell OME
+  infraEnv: "classic-baremetal"
+  networkConfig:
+    nicName: "ens5f0np0"            # Explicit NIC — overrides profile lookup
+    macIndex: "3"                   # 0-based index into interface list
+
+---
+# Example 4: Cisco UCS Server
 apiVersion: infra.example.com/v1alpha1
 kind: BareMetalHostGenerator
 metadata:

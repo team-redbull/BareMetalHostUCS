@@ -16,6 +16,7 @@ from src.openshift_utils import OpenShiftUtils
 from src.yaml_generators import YamlGenerator
 from src.unified_server_client import UnifiedServerClient, initialize_unified_client
 from src.config import operator_logger, buffer_logger, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase
+from src.server_profile_config import resolve_nic_and_mac_index
 
 # Initialize YAML generator
 yaml_generator = YamlGenerator()
@@ -44,6 +45,24 @@ _buffer_check_task: Optional[asyncio.Task] = None
 
 # Disable SSL warnings
 disable_warnings(InsecureRequestWarning)
+
+
+def _extract_network_override(spec: Dict[str, Any], server_name: str):
+    """
+    Return (nic_name_override, mac_index_override) from spec.networkConfig.
+
+    Returns (None, None) when networkConfig is absent.
+    Raises kopf.PermanentError when only one of the two fields is set.
+    """
+    nc = spec.get('networkConfig') or {}
+    nic = nc.get('nicName') or None
+    idx = nc.get('macIndex') or None
+    if bool(nic) != bool(idx):
+        raise kopf.PermanentError(
+            f"[{server_name}] spec.networkConfig requires both nicName and macIndex together, "
+            f"got nicName={nic!r}, macIndex={idx!r}"
+        )
+    return nic, idx
 
 
 @kopf.on.startup()
@@ -206,8 +225,16 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
     metadata = kwargs.get('metadata', {})
     operator_logger.info(f"Metadata for BMHG {name}: {metadata}")
 
-    server_vendor = annotations.get('server_vendor') if annotations else None
+    server_vendor = (annotations.get('server_vendor') if annotations else None)
+    if server_vendor:
+        server_vendor = server_vendor.upper()
     vlan_id = annotations.get('vlanId') if annotations else None
+    nic_name_override, mac_index_override = _extract_network_override(spec, server_name)
+    effective_nic, effective_mac_index = resolve_nic_and_mac_index(server_name, nic_name_override, mac_index_override)
+    if nic_name_override:
+        operator_logger.info(f"[{server_name}] networkConfig override: nicName={nic_name_override}, macIndex={mac_index_override}")
+    else:
+        operator_logger.info(f"[{server_name}] resolved profile: nicName={effective_nic}, macIndex={effective_mac_index}")
 
     operator_logger.info(f"Server vendor annotation: {server_vendor}")
 
@@ -237,7 +264,8 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
                 asyncio.to_thread(
                     unified_client.get_server_info,
                     server_name,
-                    server_vendor
+                    server_vendor,
+                    mac_index_override
                 ),
                 timeout=60.0  # 60 second timeout
             )
@@ -318,7 +346,8 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
                     namespace=target_namespace,
                     macAddress=mac_address,
                     infra_env=infra_env,
-                    vlanId=vlan_id
+                    vlanId=vlan_id,
+                    nic_name_override=nic_name_override
                 )
                 # Run blocking Kubernetes API call in thread pool
                 await asyncio.to_thread(
@@ -335,6 +364,8 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
         patch.status["ipmiAddress"] = ip_address
         patch.status["serverVendor"] = server_vendor
         patch.status["vlanId"] = vlan_id
+        patch.status["selectedNicName"] = effective_nic
+        patch.status["selectedMacIndex"] = effective_mac_index
 
         handler_duration = time.time() - handler_start_time
         operator_logger.info(f"[CREATE] Successfully completed BareMetalHost creation for: {server_name} (took {handler_duration:.2f}s)")
@@ -424,6 +455,12 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
         # Step 2: Re-query server info from management system
         server_name = spec.get('serverName', name)
         server_vendor = annotations.get('server_vendor') if annotations else None
+        if server_vendor:
+            server_vendor = server_vendor.upper()
+        nic_name_override, mac_index_override = _extract_network_override(spec, server_name)
+        effective_nic, effective_mac_index = resolve_nic_and_mac_index(server_name, nic_name_override, mac_index_override)
+        if nic_name_override:
+            operator_logger.info(f"[REDEPLOY] [{server_name}] networkConfig override: nicName={nic_name_override}, macIndex={mac_index_override}")
 
         operator_logger.info(f"[REDEPLOY] Querying server info for: {server_name}")
 
@@ -433,7 +470,7 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
 
         # Use global unified client to get fresh server info (run in thread to avoid blocking)
         mac_address, ipmi_address = await asyncio.to_thread(
-            unified_client.get_server_info, server_name, server_vendor
+            unified_client.get_server_info, server_name, server_vendor, mac_index_override
         )
 
         if not mac_address or not ipmi_address:
@@ -444,7 +481,7 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
         # Step 3: Recreate resources
         operator_logger.info(f"[REDEPLOY] Creating new resources for: {name}")
         await create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
-                                   server_vendor, annotations, patch)
+                                   server_vendor, annotations, patch, nic_name_override)
 
         # Step 4: Remove redeploy annotation
         operator_logger.info(f"[REDEPLOY] Removing redeploy annotation from: {name}")
@@ -453,6 +490,8 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
         # Step 5: Update status to Completed
         patch.status["phase"] = Phase.COMPLETED
         patch.status["message"] = "Resources successfully redeployed"
+        patch.status["selectedNicName"] = effective_nic
+        patch.status["selectedMacIndex"] = effective_mac_index
 
         handler_duration = time.time() - handler_start_time
         operator_logger.info(f"[REDEPLOY] Successfully completed redeploy for: {name} (took {handler_duration:.2f}s)")
@@ -547,7 +586,7 @@ async def remove_redeploy_annotation(name, namespace):
 
 
 async def create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
-                               server_vendor, annotations, patch):
+                               server_vendor, annotations, patch, nic_name_override=None):
     """
     Create BMH, Secret, and NMStateConfig resources.
 
@@ -581,7 +620,8 @@ async def create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
     if server_vendor and server_vendor.upper() == "DELL" and vlan_id:
         operator_logger.info(f"[REDEPLOY] Creating NMStateConfig for Dell server {name} with VLAN {vlan_id}")
         nmstate_data = yaml_generator.generate_nmstate_config(
-            name, target_namespace, mac_address, infra_env, vlan_id
+            name, target_namespace, mac_address, infra_env, vlan_id,
+            nic_name_override=nic_name_override
         )
         await asyncio.to_thread(
             OpenShiftUtils.create_nmstate_config, custom_api, target_namespace, nmstate_data, name

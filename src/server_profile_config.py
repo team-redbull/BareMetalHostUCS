@@ -127,3 +127,18 @@ def lookup_profile(server_name: str) -> dict:
         f"mac_index={default_entry['mac_index']}"
     )
     return default_entry
+
+
+def resolve_nic_and_mac_index(server_name: str,
+                               nic_name_override: Optional[str] = None,
+                               mac_index_override: Optional[str] = None):
+    """
+    Return (effective_nic_name, effective_mac_index).
+
+    Uses spec overrides when provided; otherwise falls back to lookup_profile().
+    Callers can store the result in CR status for user visibility.
+    """
+    if nic_name_override:
+        return nic_name_override, mac_index_override
+    profile = lookup_profile(server_name)
+    return profile['nic_name'], profile['mac_index']

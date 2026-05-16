@@ -201,14 +201,47 @@ metadata:
   namespace: default
   annotations:
     server_vendor: "HP"      # Explicit vendor (HP, DELL, CISCO)
-    vlan_id: "100"           # Optional: VLAN for Dell servers
+    vlanId: "100"            # Optional: VLAN for Dell servers
 spec:
   serverName: "ESXi-Host-01" # Name in management system
   namespace: "default"        # Target namespace for BMH
   infraEnv: "my-cluster"     # InfraEnv for OpenShift
   labels:
     node-role.kubernetes.io/worker: ""
+  # Optional: override NIC and MAC selection for this specific host
+  # networkConfig:
+  #   nicName: "ens5f0np0"   # both fields required together
+  #   macIndex: "3"
 ```
+
+### Per-host NIC and MAC Override (`spec.networkConfig`)
+
+By default the operator selects the NIC name and MAC address index from the server
+profile matching the server name (see [Dynamic Server Profiles](#dynamic-server-profiles)).
+When a host is non-standard or you know exactly which NIC/MAC to use, you can override
+profile lookup directly in the CR spec:
+
+```yaml
+spec:
+  infraEnv: my-cluster
+  networkConfig:
+    nicName: "ens5f0np0"   # exact interface name — used in NMStateConfig
+    macIndex: "3"           # 0-based index into the Dell OME interface list
+                            # also accepts "first" or "last"
+```
+
+**Rules:**
+- Both `nicName` and `macIndex` must be provided together, or neither. Providing only one raises a permanent error.
+- The override applies to **Dell** servers for MAC selection (`macIndex`) and to all vendors for NMStateConfig NIC naming (`nicName`).
+- Without `networkConfig` the behavior is identical to before — fully backward compatible.
+
+`macIndex` accepted values:
+
+| Value | Selects |
+|---|---|
+| `"first"` | first interface / first port / first partition |
+| `"last"` | last interface / last port / last partition |
+| `"2"` (integer string) | zero-based index (e.g. `"2"` → third interface) |
 
 ### Apply and Monitor
 
@@ -510,5 +543,14 @@ Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 
 ---
 
-**Maintained by**: Roi Blum
-**Repository**: https://github.com/roiblum1/BareMetalHostUCS
+**Maintained by**: Roi Blum  
+**Team**: Red Bull Technology  
+**Repository**: https://github.com/team-redbull/BareMetalHostUCS
+
+---
+
+## Credits
+
+Designed, implemented, and maintained by **Roi Blum** as part of the Red Bull Technology infrastructure team.
+
+![Credits](credits.jpeg)

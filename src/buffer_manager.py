@@ -10,6 +10,7 @@ from src.yaml_generators import YamlGenerator
 from src.openshift_utils import OpenShiftUtils
 from src.unified_server_client import UnifiedServerClient
 from src.config import buffer_logger, MAX_AVAILABLE_SERVERS, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase
+from src.server_profile_config import resolve_nic_and_mac_index
 
 class BufferManager:
     def __init__(self, custom_api: client.CustomObjectsApi = None, core_v1: client.CoreV1Api = None):
@@ -169,6 +170,16 @@ class BufferManager:
         server_name = name
         self.buffer_logger.info(f"Processing buffered generator: {name}")
 
+        # Extract per-CR network config overrides (present for spec override feature)
+        _nc = (bmhgen.get('spec') or {}).get('networkConfig') or {}
+        nic_name_override = _nc.get('nicName') or None
+        mac_index_override = _nc.get('macIndex') or None
+        effective_nic, effective_mac_index = resolve_nic_and_mac_index(name, nic_name_override, mac_index_override)
+        if nic_name_override:
+            self.buffer_logger.info(f"[{name}] networkConfig override: nicName={nic_name_override}, macIndex={mac_index_override}")
+        else:
+            self.buffer_logger.info(f"[{name}] resolved profile: nicName={effective_nic}, macIndex={effective_mac_index}")
+
         # Safety check: verify this generator is still in Buffered phase
         if not await self._verify_still_buffered(namespace, name):
             self.buffer_logger.warning(f"Generator {name} is no longer in Buffered phase, skipping")
@@ -184,6 +195,8 @@ class BufferManager:
             if not server_vendor:
                 annotations = bmhgen.get('metadata', {}).get('annotations', {})
                 server_vendor = annotations.get('server_vendor')
+                if server_vendor:
+                    server_vendor = server_vendor.upper()
                 if not server_vendor:
                     # Fallback to default detection logic
                     from src.server_strategy import ServerTypeDetector
@@ -206,7 +219,7 @@ class BufferManager:
                     loop = asyncio.get_event_loop()
                     mac_address, ipmi_address = await loop.run_in_executor(
                         None,
-                        lambda: unified_client.get_server_info(server_name, server_vendor)
+                        lambda: unified_client.get_server_info(server_name, server_vendor, mac_index_override)
                     )
                     status_update = {
                         "macAddress": mac_address,
@@ -265,7 +278,9 @@ class BufferManager:
                     "macAddress": mac_address,
                     "ipmiAddress": ipmi_address,
                     "serverVendor": server_vendor,
-                    "vlanId": vlan_id
+                    "vlanId": vlan_id,
+                    "selectedNicName": effective_nic,
+                    "selectedMacIndex": effective_mac_index,
                 }
                 # Run blocking Kubernetes API call in thread pool
                 loop = asyncio.get_event_loop()
@@ -323,7 +338,8 @@ class BufferManager:
                     namespace=target_namespace,
                     macAddress=mac_address,
                     infra_env=infra_env,
-                    vlanId=vlan_id
+                    vlanId=vlan_id,
+                    nic_name_override=nic_name_override
                 )
                 # Run blocking Kubernetes API call in thread pool
                 await loop.run_in_executor(
@@ -340,7 +356,9 @@ class BufferManager:
                 "macAddress": mac_address,
                 "ipmiAddress": ipmi_address,
                 "serverVendor": server_vendor,
-                "vlanId": vlan_id
+                "vlanId": vlan_id,
+                "selectedNicName": effective_nic,
+                "selectedMacIndex": effective_mac_index,
             }
 
             # CRITICAL: Update status to Completed - this must succeed to prevent re-processing

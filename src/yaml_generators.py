@@ -103,22 +103,24 @@ class YamlGenerator:
     def __init__(self):
         self.bmh_logger = bmh_logger
 
-    def _get_interface_name(self, server_name: str) -> str:
+    def _get_interface_name(self, server_name: str, nic_name_override: Optional[str] = None) -> str:
         """
         Determine the network interface name based on server type.
 
-        Server types:
-        - H100 servers: ens8f0np0
-        - H200 servers: ens33f0np0
-        - Data servers: ens2f0np0
-        - Default: eno12399np0
+        If nic_name_override is provided it is used directly, bypassing profile lookup.
 
         Args:
             server_name: Name of the server
+            nic_name_override: Optional explicit NIC name from spec.networkConfig.nicName
 
         Returns:
             Interface name string
         """
+        if nic_name_override:
+            self.bmh_logger.info(
+                f"Server '{server_name}' → nic_name='{nic_name_override}' (spec override)"
+            )
+            return nic_name_override
         profile = lookup_profile(server_name)
         self.bmh_logger.info(f"Server '{server_name}' → nic_name='{profile['nic_name']}'")
         return profile["nic_name"]
@@ -284,7 +286,8 @@ class YamlGenerator:
         self.bmh_logger.info(f"Successfully generated BMC secret definition for {secret_name}")
         return secret_data
     
-    def generate_nmstate_config(self, name: str, namespace: str, macAddress: str, infra_env: str, vlanId: str) -> Dict[str, Any]:
+    def generate_nmstate_config(self, name: str, namespace: str, macAddress: str, infra_env: str, vlanId: str,
+                                nic_name_override: Optional[str] = None) -> Dict[str, Any]:
         """Generate NMStateConfig resource definition"""
         self.bmh_logger.info(f"Generating NMStateConfig for {name} in namespace {namespace}")
         self.bmh_logger.info(f"MacAddress: {macAddress}")
@@ -301,8 +304,8 @@ class YamlGenerator:
         except ValueError as e:
             raise ValueError(f"VLAN ID must be a valid integer, got: {vlanId}") from e
 
-        # Determine interface name based on server type
-        interface_name = self._get_interface_name(name)
+        # Determine interface name based on server type (or spec override)
+        interface_name = self._get_interface_name(name, nic_name_override)
         self.bmh_logger.info(f"Configuring the nmstateconfig with {interface_name}.{vlan_id_int}")
         nmstate_data = {
             "apiVersion": f"{NMStateConfigCRD.GROUP}/{NMStateConfigCRD.VERSION}",
