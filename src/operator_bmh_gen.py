@@ -229,7 +229,7 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
     server_vendor = spec.get('server_vendor')
     if server_vendor:
         server_vendor = server_vendor.upper()
-    vlan_id = (spec.get('network') or {}).get('vlanId')
+    vlan_id = (spec.get('networkConfig') or {}).get('vlanId')
     vlan_id = str(vlan_id) if vlan_id is not None else None
     nic_name_override, mac_index_override = _extract_network_override(spec, server_name)
     effective_nic, effective_mac_index = resolve_nic_and_mac_index(server_name, nic_name_override, mac_index_override)
@@ -597,12 +597,12 @@ async def create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
     """
     Create BMH, Secret, and NMStateConfig resources.
 
-    Note: NMStateConfig is only created for Dell servers when spec.network.vlanId is set.
+    Note: NMStateConfig is only created for Dell servers when spec.networkConfig.vlanId is set.
     """
     target_namespace = spec.get('namespace', namespace)
     infra_env = spec.get('infraEnv')
     labels = spec.get('labels', {})
-    vlan_id = (spec.get('network') or {}).get('vlanId')
+    vlan_id = (spec.get('networkConfig') or {}).get('vlanId')
     vlan_id = str(vlan_id) if vlan_id is not None else None
 
     operator_logger.info(f"[REDEPLOY] Creating resources in namespace: {target_namespace}")

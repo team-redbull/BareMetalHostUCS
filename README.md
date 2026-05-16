@@ -204,44 +204,41 @@ spec:
   namespace: "default"        # Target namespace for BMH
   infraEnv: "my-cluster"     # InfraEnv for OpenShift
   server_vendor: HP           # HP, DELL, or CISCO (case-insensitive); omit to auto-detect
-  network:
-    vlanId: 100               # Optional: VLAN ID (1-4094) for Dell NMStateConfig
   labels:
     node-role.kubernetes.io/worker: ""
-  # Optional: override NIC and MAC selection for this specific host
+  # networkConfig is optional for HP/Cisco; vlanId is required for Dell
   # networkConfig:
-  #   nicName: "ens5f0np0"   # both fields required together
-  #   macIndex: "3"
+  #   vlanId: 100             # Required for Dell (1-4094); triggers NMStateConfig creation
+  #   nicName: "ens5f0np0"   # Optional override — both nicName and macIndex required together
+  #   macIndex: "3"           # Optional override — "first", "last", or 0-based integer
 ```
 
-### Per-host NIC and MAC Override (`spec.networkConfig`)
+### `spec.networkConfig`
 
-By default the operator selects the NIC name and MAC address index from the server
-profile matching the server name (see [Dynamic Server Profiles](#dynamic-server-profiles)).
-When a host is non-standard or you know exactly which NIC/MAC to use, you can override
-profile lookup directly in the CR spec:
+All network settings live under one `spec.networkConfig` object:
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `vlanId` | Dell only | VLAN ID (1–4094). Triggers NMStateConfig creation for Dell servers. |
+| `nicName` | Optional pair | Exact interface name used in NMStateConfig. Must be set with `macIndex`. |
+| `macIndex` | Optional pair | MAC selection — `"first"`, `"last"`, or 0-based integer (e.g. `"3"`). Must be set with `nicName`. |
 
 ```yaml
 spec:
   infraEnv: my-cluster
+  server_vendor: DELL
   networkConfig:
-    nicName: "ens5f0np0"   # exact interface name — used in NMStateConfig
-    macIndex: "3"           # 0-based index into the Dell OME interface list
-                            # also accepts "first" or "last"
+    vlanId: 24              # required for Dell
+    nicName: "ens5f0np0"   # optional — overrides profile; must pair with macIndex
+    macIndex: "3"           # optional — 0-based index into Dell OME interface list
 ```
 
 **Rules:**
-- Both `nicName` and `macIndex` must be provided together, or neither. Providing only one raises a permanent error.
-- The override applies to **Dell** servers for MAC selection (`macIndex`) and to all vendors for NMStateConfig NIC naming (`nicName`).
-- Without `networkConfig` the behavior is identical to before — fully backward compatible.
 
-`macIndex` accepted values:
-
-| Value | Selects |
-|---|---|
-| `"first"` | first interface / first port / first partition |
-| `"last"` | last interface / last port / last partition |
-| `"2"` (integer string) | zero-based index (e.g. `"2"` → third interface) |
+- `vlanId` is independent — you can set it without `nicName`/`macIndex`.
+- `nicName` and `macIndex` must be provided together, or neither. Providing only one raises a permanent error.
+- Without `nicName`/`macIndex` the operator uses the server profile (see [Dynamic Server Profiles](#dynamic-server-profiles)).
+- `macIndex` only applies to Dell MAC selection; HP and Cisco use their own MAC discovery.
 
 ### Apply and Monitor
 

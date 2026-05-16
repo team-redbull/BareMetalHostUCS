@@ -35,15 +35,21 @@ spec:
                 type: string
                 pattern: "(?i)^(HP|DELL|CISCO)$"
                 description: "Server vendor type: HP, DELL, or CISCO (case-insensitive)."
-              network:
+              networkConfig:
                 type: object
-                description: "Network configuration for the BareMetalHost"
+                description: "Network configuration for this host. vlanId is required for Dell servers. nicName and macIndex are optional overrides and must be provided together."
                 properties:
                   vlanId:
                     type: integer
                     minimum: 1
                     maximum: 4094
-                    description: "VLAN ID for network configuration (1-4094)."
+                    description: "VLAN ID for Dell NMStateConfig (1-4094). Required for Dell servers."
+                  nicName:
+                    type: string
+                    description: "Network interface name (e.g. ens8f0np0). Overrides server profile lookup. Must be set with macIndex."
+                  macIndex:
+                    type: string
+                    description: "MAC address selection — 'first', 'last', or 0-based integer (e.g. '2'). Overrides server profile lookup. Must be set with nicName."
           status:
             type: object
             properties:
