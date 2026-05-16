@@ -11,6 +11,7 @@ from src.openshift_utils import OpenShiftUtils
 from src.unified_server_client import UnifiedServerClient
 from src.config import buffer_logger, MAX_AVAILABLE_SERVERS, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase
 from src.server_profile_config import resolve_nic_and_mac_index
+from src.mongo_server_client import MongoServerClient
 
 class BufferManager:
     def __init__(self, custom_api: client.CustomObjectsApi = None, core_v1: client.CoreV1Api = None):
@@ -162,7 +163,8 @@ class BufferManager:
         self,
         bmhgen: Dict[str, Any],
         unified_client: UnifiedServerClient,
-        yaml_generator: YamlGenerator
+        yaml_generator: YamlGenerator,
+        mongo_client: Optional[MongoServerClient] = None,
     ) -> None:
         """Process a single buffered BareMetalHostGenerator"""
         name = bmhgen['metadata']['name']
@@ -198,6 +200,41 @@ class BufferManager:
                 server_vendor = detected_type.value.upper()
 
             vlan_id = status.get('vlanId')
+
+            # --- MongoDB path: installed guard + MAC/BMC lookup ---
+            if mongo_client:
+                mongo_doc = await mongo_client.get_server(server_name)
+                if mongo_doc:
+                    if mongo_doc.get("installed"):
+                        cluster = mongo_doc.get("deployed_cluster") or "unknown cluster"
+                        self.buffer_logger.warning(
+                            f"[BUFFER] Server '{server_name}' is already installed in '{cluster}'. "
+                            f"Skipping BMH creation."
+                        )
+                        error_status = {
+                            "phase": Phase.FAILED,
+                            "message": (
+                                f"Server '{server_name}' is already installed in '{cluster}'. "
+                                f"BMH creation skipped to avoid conflict."
+                            ),
+                        }
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            None,
+                            lambda: OpenShiftUtils.update_bmh_status(
+                                self.custom_api, name, namespace, error_status,
+                                BMHGenCRD.GROUP, BMHGenCRD.VERSION, BMHGenCRD.PLURAL
+                            )
+                        )
+                        return
+                    mongo_mac = mongo_doc.get("mac_address")
+                    mongo_bmc = mongo_doc.get("bmc_address")
+                    if mongo_mac and mongo_bmc:
+                        mac_address  = mongo_mac
+                        ipmi_address = mongo_bmc
+                        self.buffer_logger.info(
+                            f"[BUFFER] [{server_name}] resolved from MongoDB: mac={mac_address}, bmc={ipmi_address}"
+                        )
 
             if not mac_address or not ipmi_address:
                 self.buffer_logger.error(f"Missing server info for buffered generator {name}")
@@ -390,7 +427,8 @@ class BufferManager:
     async def buffer_check_iteration(
         self,
         unified_client: UnifiedServerClient,
-        yaml_generator: YamlGenerator
+        yaml_generator: YamlGenerator,
+        mongo_client: Optional[MongoServerClient] = None,
     ) -> Dict[str, int]:
         """
         Single iteration of buffer check - used by kopf daemon.
@@ -423,7 +461,7 @@ class BufferManager:
                     gen_name = bmhgen['metadata']['name']
                     self.buffer_logger.info(f"Releasing buffered generator {gen_name} from buffer")
                     try:
-                        await self.process_buffered_generator(bmhgen, unified_client, yaml_generator)
+                        await self.process_buffered_generator(bmhgen, unified_client, yaml_generator, mongo_client)
                         stats["released_count"] += 1
                     except Exception as process_error:
                         self.buffer_logger.error(f"Failed to process buffered generator {gen_name}: {process_error}")

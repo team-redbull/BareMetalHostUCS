@@ -15,8 +15,9 @@ from src.buffer_manager import BufferManager
 from src.openshift_utils import OpenShiftUtils
 from src.yaml_generators import YamlGenerator
 from src.unified_server_client import UnifiedServerClient, initialize_unified_client
-from src.config import operator_logger, buffer_logger, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase
+from src.config import operator_logger, buffer_logger, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase, MONGO_URI, MONGO_DB_NAME
 from src.server_profile_config import resolve_nic_and_mac_index
+from src.mongo_server_client import MongoServerClient
 
 # Initialize YAML generator
 yaml_generator = YamlGenerator()
@@ -39,6 +40,7 @@ operator_logger.info("Kubernetes client initialized.")
 # Initialize buffer manager and unified client (will be set in startup)
 buffer_manager = BufferManager(custom_api, core_api)
 unified_client: Optional[UnifiedServerClient] = None
+_mongo_client: Optional[MongoServerClient] = None
 
 # Background task for buffer checking (created in startup)
 _buffer_check_task: Optional[asyncio.Task] = None
@@ -109,8 +111,15 @@ async def configure(settings: kopf.OperatorSettings, **_):
         operator_logger.error(f"Failed to access Kubernetes API or custom resources: {e}")
 
     # Initialize unified client
-    global unified_client
+    global unified_client, _mongo_client
     unified_client = initialize_unified_client()
+
+    # Initialize MongoDB client (opt-in)
+    if MONGO_URI:
+        _mongo_client = MongoServerClient(MONGO_URI, MONGO_DB_NAME)
+        operator_logger.info(f"MongoDB integration enabled — db={MONGO_DB_NAME}")
+    else:
+        operator_logger.info("MongoDB integration disabled (MONGO_URI not set) — using vendor APIs directly")
 
     # Check initial available BareMetalHost count
     try:
@@ -159,7 +168,7 @@ async def _buffer_check_loop():
                 continue
 
             # Perform buffer check iteration
-            stats = await buffer_manager.buffer_check_iteration(unified_client, yaml_generator)
+            stats = await buffer_manager.buffer_check_iteration(unified_client, yaml_generator, _mongo_client)
             buffer_logger.info(
                 f"Buffer check completed: "
                 f"available={stats['available_count']}, "
@@ -264,23 +273,53 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
 
     try:
         operator_logger.info(f"Searching for server info: {server_name}")
-        # Run blocking network call in thread pool with timeout to avoid blocking event loop
-        # Timeout after 60 seconds to prevent hanging handlers
-        try:
-            mac_address, ip_address = await asyncio.wait_for(
-                asyncio.to_thread(
-                    unified_client.get_server_info,
-                    server_name,
-                    server_vendor,
-                    mac_index_override
-                ),
-                timeout=60.0  # 60 second timeout
-            )
-        except asyncio.TimeoutError:
-            operator_logger.error(f"Timeout getting server info for {server_name} after 60 seconds")
-            patch.status["phase"] = Phase.FAILED
-            patch.status["message"] = f"Timeout getting server info for {server_name} - request took longer than 60 seconds"
-            raise kopf.PermanentError(f"Timeout getting server info for {server_name}")
+
+        mac_address, ip_address = None, None
+
+        # --- MongoDB path (primary) ---
+        if _mongo_client:
+            mongo_doc = await _mongo_client.get_server(server_name)
+            if mongo_doc:
+                if mongo_doc.get("installed"):
+                    cluster = mongo_doc.get("deployed_cluster") or "unknown cluster"
+                    patch.status["phase"] = Phase.FAILED
+                    patch.status["message"] = (
+                        f"Server '{server_name}' is already installed in '{cluster}'. "
+                        f"BMH creation skipped to avoid conflict."
+                    )
+                    raise kopf.PermanentError(
+                        f"Server '{server_name}' already installed in '{cluster}'"
+                    )
+                mac_address = mongo_doc.get("mac_address")
+                ip_address  = mongo_doc.get("bmc_address")
+                if mac_address and ip_address:
+                    operator_logger.info(
+                        f"[{server_name}] resolved from MongoDB: mac={mac_address}, bmc={ip_address}"
+                    )
+                else:
+                    operator_logger.warning(
+                        f"[{server_name}] MongoDB doc incomplete (mac={mac_address}, bmc={ip_address}) "
+                        f"— falling back to vendor API"
+                    )
+                    mac_address, ip_address = None, None
+
+        # --- Vendor API fallback ---
+        if not mac_address or not ip_address:
+            try:
+                mac_address, ip_address = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        unified_client.get_server_info,
+                        server_name,
+                        server_vendor,
+                        mac_index_override
+                    ),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                operator_logger.error(f"Timeout getting server info for {server_name} after 60 seconds")
+                patch.status["phase"] = Phase.FAILED
+                patch.status["message"] = f"Timeout getting server info for {server_name} - request took longer than 60 seconds"
+                raise kopf.PermanentError(f"Timeout getting server info for {server_name}")
 
         if not mac_address or not ip_address:
             # Update status before raising error
@@ -475,10 +514,34 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
         if unified_client is None:
             raise kopf.PermanentError("Unified client not initialized - cannot query server info")
 
-        # Use global unified client to get fresh server info (run in thread to avoid blocking)
-        mac_address, ipmi_address = await asyncio.to_thread(
-            unified_client.get_server_info, server_name, server_vendor, mac_index_override
-        )
+        mac_address, ipmi_address = None, None
+
+        # MongoDB path (primary)
+        if _mongo_client:
+            mongo_doc = await _mongo_client.get_server(server_name)
+            if mongo_doc:
+                if mongo_doc.get("installed"):
+                    cluster = mongo_doc.get("deployed_cluster") or "unknown cluster"
+                    raise kopf.PermanentError(
+                        f"[REDEPLOY] Server '{server_name}' already installed in '{cluster}'"
+                    )
+                mac_address  = mongo_doc.get("mac_address")
+                ipmi_address = mongo_doc.get("bmc_address")
+                if mac_address and ipmi_address:
+                    operator_logger.info(
+                        f"[REDEPLOY] [{server_name}] resolved from MongoDB: mac={mac_address}, bmc={ipmi_address}"
+                    )
+                else:
+                    operator_logger.warning(
+                        f"[REDEPLOY] [{server_name}] MongoDB doc incomplete — falling back to vendor API"
+                    )
+                    mac_address, ipmi_address = None, None
+
+        # Vendor API fallback
+        if not mac_address or not ipmi_address:
+            mac_address, ipmi_address = await asyncio.to_thread(
+                unified_client.get_server_info, server_name, server_vendor, mac_index_override
+            )
 
         if not mac_address or not ipmi_address:
             raise kopf.PermanentError(f"Failed to retrieve server info for {server_name}")
@@ -755,6 +818,14 @@ async def cleanup_fn(**kwargs):
             operator_logger.info("Disconnected from server management systems")
         except Exception as e:
             operator_logger.warning(f"Error disconnecting from server management systems: {e}")
+
+    # Close MongoDB connection
+    if _mongo_client:
+        try:
+            await _mongo_client.close()
+            operator_logger.info("MongoDB connection closed")
+        except Exception as e:
+            operator_logger.warning(f"Error closing MongoDB connection: {e}")
 
     operator_logger.info("Cleanup completed")
 

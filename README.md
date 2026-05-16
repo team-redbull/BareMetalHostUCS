@@ -200,6 +200,27 @@ DELL_BMC_PASSWORD=calvin
 
 **Important:** Management system credentials are used by the operator to query server info. BMC credentials are used by Metal3/Ironic to provision servers.
 
+#### MongoDB Integration (optional)
+
+```bash
+# Leave empty to use vendor APIs directly (default behaviour)
+MONGO_URI=mongodb://user:pass@mongo-host:27017/
+MONGO_DB_NAME=server_scanner   # default
+```
+
+When `MONGO_URI` is set, the operator reads `mac_address` and `bmc_address` from the
+`server_scanner.servers` MongoDB collection (populated by the **Scan_Servers** CronJob)
+instead of querying vendor APIs on every reconciliation.
+
+**Installed server guard:** if the MongoDB document has `installed: true`, the operator
+sets the BMHGen to `Failed` with a message indicating which cluster/MCE already owns the
+server, and skips BMH creation entirely. This prevents double-provisioning and saves scan
+time.
+
+**Fallback:** if `MONGO_URI` is empty, or the server is not found in MongoDB, or the
+document is missing `mac_address`/`bmc_address`, the operator falls back to the vendor
+API (original behaviour — fully backward compatible).
+
 ## Usage
 
 ### Create a BareMetalHostGenerator

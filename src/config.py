@@ -143,3 +143,13 @@ class Phase:
     FAILED = "Failed"
 
 
+# ============================================================================
+# MongoDB Integration (opt-in)
+# ============================================================================
+
+# Set MONGO_URI to enable MongoDB-first server lookup.
+# Leave empty to use vendor APIs directly (original behaviour).
+MONGO_URI = os.getenv("MONGO_URI", "")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "server_scanner")
+
+
