@@ -31,6 +31,19 @@ spec:
                 additionalProperties:
                   type: string
                 description: "Additional labels to apply to the BareMetalHost"
+              server_vendor:
+                type: string
+                pattern: "(?i)^(HP|DELL|CISCO)$"
+                description: "Server vendor type: HP, DELL, or CISCO (case-insensitive)."
+              network:
+                type: object
+                description: "Network configuration for the BareMetalHost"
+                properties:
+                  vlanId:
+                    type: integer
+                    minimum: 1
+                    maximum: 4094
+                    description: "VLAN ID for network configuration (1-4094)."
               networkConfig:
                 type: object
                 description: "Optional per-host NIC and MAC overrides. Both fields must be provided together."
@@ -86,7 +99,7 @@ spec:
       jsonPath: .spec.serverName
     - name: Vendor
       type: string
-      jsonPath: .metadata.annotations.server_vendor
+      jsonPath: .spec.server_vendor
     - name: Phase
       type: string
       jsonPath: .status.phase

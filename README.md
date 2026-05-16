@@ -19,7 +19,7 @@ The BareMetalHostGenerator operator:
 ## Key Features
 
 - **Multi-vendor support**: HP ProLiant (iLO), Cisco UCS (CIMC), Dell PowerEdge (iDRAC)
-- **Automatic vendor detection**: Via annotations or naming patterns
+- **Automatic vendor detection**: Via `spec.server_vendor` or naming patterns
 - **Smart buffering**: Limits available BareMetalHosts to 20 (configurable)
 - **Vendor-specific BMC protocols**:
   - HP: `redfish-virtualmedia://`
@@ -199,13 +199,13 @@ kind: BareMetalHostGenerator
 metadata:
   name: worker-01
   namespace: default
-  annotations:
-    server_vendor: "HP"      # Explicit vendor (HP, DELL, CISCO)
-    vlanId: "100"            # Optional: VLAN for Dell servers
 spec:
   serverName: "ESXi-Host-01" # Name in management system
   namespace: "default"        # Target namespace for BMH
   infraEnv: "my-cluster"     # InfraEnv for OpenShift
+  server_vendor: HP           # HP, DELL, or CISCO (case-insensitive); omit to auto-detect
+  network:
+    vlanId: 100               # Optional: VLAN ID (1-4094) for Dell NMStateConfig
   labels:
     node-role.kubernetes.io/worker: ""
   # Optional: override NIC and MAC selection for this specific host
@@ -270,15 +270,12 @@ kubectl get bmh -A
 
 The operator detects vendor in this order:
 
-1. **Explicit annotation** (recommended):
-   ```yaml
-   annotations:
-     server_vendor: "HP"
-   ```
+1. **`spec.server_vendor`** (recommended): `HP`, `DELL`, or `CISCO` — case-insensitive, validated by the CRD schema.
 
-2. **Name-based heuristics**:
-   - Contains `rf` → HP
-   - Contains `ome` → Dell
+2. **Name-based heuristics** (when `spec.server_vendor` is omitted):
+   - Contains `hp` → HP
+   - Contains `dell` → Dell
+   - Contains `cisco` → Cisco
    - Default → Cisco
 
 ## Buffer Management
