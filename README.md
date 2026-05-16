@@ -8,6 +8,7 @@ A Kubernetes operator that automatically creates BareMetalHost resources by quer
 ## Overview
 
 The BareMetalHostGenerator operator:
+
 - ✅ Connects to multiple server management systems (HP OneView, Cisco UCS, Dell OME)
 - ✅ Automatically queries server information (MAC addresses, BMC IPs)
 - ✅ Creates BareMetalHost resources with vendor-specific BMC configurations
@@ -15,12 +16,15 @@ The BareMetalHostGenerator operator:
 - ✅ Generates BMC secrets with vendor-specific credentials
 - ✅ Supports OpenShift Agent-based Installation workflows
 - ✅ Handles NMStateConfig for Dell servers with VLAN configuration
+- ✅ Per-host NIC and MAC override via `spec.networkConfig`
 
 ## Key Features
 
 - **Multi-vendor support**: HP ProLiant (iLO), Cisco UCS (CIMC), Dell PowerEdge (iDRAC)
-- **Automatic vendor detection**: Via `spec.server_vendor` or naming patterns
+- **Automatic vendor detection**: Via `spec.server_vendor` or server name patterns
 - **Smart buffering**: Limits available BareMetalHosts to 20 (configurable)
+- **Dynamic server profiles**: NIC/MAC mapping loaded from a ConfigMap — no image rebuild needed
+- **Per-host network override**: `spec.networkConfig` lets you pin `vlanId`, `nicName`, and `macIndex` per CR
 - **Vendor-specific BMC protocols**:
   - HP: `redfish-virtualmedia://`
   - Dell: `idrac-virtualmedia://`
@@ -30,7 +34,7 @@ The BareMetalHostGenerator operator:
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │ BareMetalHostGenerator CRD                                   │
 │ (User creates one per server)                                │
@@ -57,7 +61,7 @@ The BareMetalHostGenerator operator:
 │ Generated Resources                                           │
 │ - BareMetalHost (Metal3)                                     │
 │ - Secret (BMC credentials)                                   │
-│ - NMStateConfig (Dell servers with VLAN)                     │
+│ - NMStateConfig (Dell servers with vlanId)                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,10 +80,6 @@ The BareMetalHostGenerator operator:
 ### Installation via Helm (Recommended)
 
 ```bash
-# Add Helm repository (if published)
-# helm repo add bmh-generator https://your-registry/charts
-# helm repo update
-
 # Install with HP OneView
 helm install bmh-generator deploy/helm/bmh-generator-operator \
   --namespace metal3-system \
@@ -99,39 +99,44 @@ helm install bmh-generator deploy/helm/bmh-generator-operator \
 ### Manual Installation
 
 1. **Deploy CRD:**
-```bash
-kubectl apply -f deploy/crd.yaml
-```
 
-2. **Create namespace:**
-```bash
-kubectl create namespace metal3-system
-```
+   ```bash
+   kubectl apply -f deploy/crd.yaml
+   ```
 
-3. **Deploy RBAC:**
-```bash
-kubectl apply -f deploy/rbac.yaml
-```
+1. **Create namespace:**
 
-4. **Create credentials secret:**
-```bash
-kubectl create secret generic bmh-operator-credentials \
-  --namespace=metal3-system \
-  --from-literal=ONEVIEW_PASSWORD='your-oneview-password' \
-  --from-literal=HP_BMC_PASSWORD='your-ilo-password'
-```
+   ```bash
+   kubectl create namespace metal3-system
+   ```
 
-5. **Deploy operator:**
-```bash
-# Update deploy/deployment.yaml with your registry and credentials
-kubectl apply -f deploy/deployment.yaml
-```
+1. **Deploy RBAC:**
 
-6. **Verify:**
-```bash
-kubectl get pods -n metal3-system
-kubectl logs -n metal3-system -l app=bmh-generator-operator
-```
+   ```bash
+   kubectl apply -f deploy/rbac.yaml
+   ```
+
+1. **Create credentials secret:**
+
+   ```bash
+   kubectl create secret generic bmh-operator-credentials \
+     --namespace=metal3-system \
+     --from-literal=ONEVIEW_PASSWORD='your-oneview-password' \
+     --from-literal=HP_BMC_PASSWORD='your-ilo-password'
+   ```
+
+1. **Deploy operator:**
+
+   ```bash
+   kubectl apply -f deploy/deployment.yaml
+   ```
+
+1. **Verify:**
+
+   ```bash
+   kubectl get pods -n metal3-system
+   kubectl logs -n metal3-system -l app=bmh-generator-operator
+   ```
 
 ## Configuration
 
@@ -140,6 +145,7 @@ kubectl logs -n metal3-system -l app=bmh-generator-operator
 The operator uses environment variables for configuration. See [.env.example](.env.example) for all options.
 
 #### Core Configuration
+
 ```bash
 LOG_LEVEL=INFO                    # Logging level
 MAX_AVAILABLE_SERVERS=20          # Buffer limit
@@ -147,12 +153,15 @@ BUFFER_CHECK_INTERVAL=30          # Check interval in seconds
 ```
 
 #### Server Profiles Path
+
 ```bash
 SERVER_PROFILES_PATH=/config/profiles.yaml   # YAML file mounted from ConfigMap
 ```
+
 Override for local development (see [Dynamic Server Profiles](#dynamic-server-profiles) below).
 
 #### HP OneView (Management System)
+
 ```bash
 ONEVIEW_IP=10.0.0.1
 ONEVIEW_USERNAME=administrator
@@ -164,6 +173,7 @@ HP_BMC_PASSWORD=<secret>
 ```
 
 #### Cisco UCS (Management System)
+
 ```bash
 UCS_CENTRAL_IP=10.0.0.2
 UCS_CENTRAL_USERNAME=admin
@@ -177,6 +187,7 @@ CISCO_BMC_PASSWORD=<secret>
 ```
 
 #### Dell OME (Management System)
+
 ```bash
 OME_IP=10.0.0.3
 OME_USERNAME=admin
@@ -200,17 +211,17 @@ metadata:
   name: worker-01
   namespace: default
 spec:
-  serverName: "ESXi-Host-01" # Name in management system
-  namespace: "default"        # Target namespace for BMH
-  infraEnv: "my-cluster"     # InfraEnv for OpenShift
-  server_vendor: HP           # HP, DELL, or CISCO (case-insensitive); omit to auto-detect
+  serverName: "ESXi-Host-01"  # Name in management system
+  namespace: "default"         # Target namespace for BMH
+  infraEnv: "my-cluster"      # InfraEnv for OpenShift
+  server_vendor: HP            # HP, DELL, or CISCO (case-insensitive); omit to auto-detect
   labels:
     node-role.kubernetes.io/worker: ""
   # networkConfig is optional for HP/Cisco; vlanId is required for Dell
   # networkConfig:
-  #   vlanId: 100             # Required for Dell (1-4094); triggers NMStateConfig creation
-  #   nicName: "ens5f0np0"   # Optional override — both nicName and macIndex required together
-  #   macIndex: "3"           # Optional override — "first", "last", or 0-based integer
+  #   vlanId: 100              # Required for Dell (1-4094); triggers NMStateConfig creation
+  #   nicName: "ens5f0np0"    # Optional override — must be paired with macIndex
+  #   macIndex: "3"            # Optional override — "first", "last", or 0-based integer
 ```
 
 ### `spec.networkConfig`
@@ -224,21 +235,29 @@ All network settings live under one `spec.networkConfig` object:
 | `macIndex` | Optional pair | MAC selection — `"first"`, `"last"`, or 0-based integer (e.g. `"3"`). Must be set with `nicName`. |
 
 ```yaml
+# Dell server — vlanId only (uses default NIC/MAC from server profile)
 spec:
-  infraEnv: my-cluster
   server_vendor: DELL
   networkConfig:
-    vlanId: 24              # required for Dell
-    nicName: "ens5f0np0"   # optional — overrides profile; must pair with macIndex
-    macIndex: "3"           # optional — 0-based index into Dell OME interface list
+    vlanId: 24
+
+# Dell server — vlanId + explicit NIC/MAC override
+spec:
+  server_vendor: DELL
+  networkConfig:
+    vlanId: 24
+    nicName: "ens5f0np0"   # overrides profile lookup
+    macIndex: "3"           # 0-based index into Dell OME interface list
 ```
 
 **Rules:**
 
 - `vlanId` is independent — you can set it without `nicName`/`macIndex`.
 - `nicName` and `macIndex` must be provided together, or neither. Providing only one raises a permanent error.
-- Without `nicName`/`macIndex` the operator uses the server profile (see [Dynamic Server Profiles](#dynamic-server-profiles)).
+- Without `nicName`/`macIndex` the operator falls back to the server profile (see [Dynamic Server Profiles](#dynamic-server-profiles)).
 - `macIndex` only applies to Dell MAC selection; HP and Cisco use their own MAC discovery.
+
+After a successful reconciliation, the CR status always shows which NIC and MAC index were used (`selectedNicName`, `selectedMacIndex`), whether they came from the spec override or the profile.
 
 ### Apply and Monitor
 
@@ -259,7 +278,7 @@ kubectl get bmh -A
 ### Status Phases
 
 - **Processing**: Querying management systems
-- **Buffered**: Server info retrieved, waiting for slot
+- **Buffered**: Server info retrieved, waiting for available slot
 - **Completed**: BareMetalHost created successfully
 - **Failed**: Error occurred
 
@@ -269,7 +288,7 @@ The operator detects vendor in this order:
 
 1. **`spec.server_vendor`** (recommended): `HP`, `DELL`, or `CISCO` — case-insensitive, validated by the CRD schema.
 
-2. **Name-based heuristics** (when `spec.server_vendor` is omitted):
+1. **Name-based heuristics** (when `spec.server_vendor` is omitted):
    - Contains `hp` → HP
    - Contains `dell` → Dell
    - Contains `cisco` → Cisco
@@ -282,7 +301,7 @@ The operator limits available (non-provisioned) BareMetalHosts:
 - **Default limit**: 20 servers
 - **Check interval**: 30 seconds
 - **Behavior**: New servers are buffered when limit reached
-- **Release**: FIFO - first buffered, first released
+- **Release**: FIFO — first buffered, first released
 
 ```bash
 # Check buffer status
@@ -306,7 +325,7 @@ profiles:
   - pattern: "h200"
     nic_name: "ens33f0np0"
     mac_index: "2"
-  - pattern: "10tb-"
+  - pattern: "10tb-"       # trailing dash prevents matching serial numbers like A10TBX123
     nic_name: "ens2f0np0"
     mac_index: "last"      # last NIC/port/partition
   - default: true          # fallback when no pattern matches
@@ -315,6 +334,7 @@ profiles:
 ```
 
 **`mac_index` values:**
+
 - `"first"` — first interface / first port / first partition
 - `"last"` — last interface / last port / last partition
 - `"2"` (integer string) — zero-based index into the interface list
@@ -324,6 +344,7 @@ Pattern matching is case-insensitive substring search. First match wins.
 ### Adding a New Server Type
 
 **Via Helm (recommended):**
+
 ```yaml
 # values.yaml
 serverProfiles:
@@ -333,18 +354,20 @@ serverProfiles:
       mac_index: "0"
     # ... existing entries ...
 ```
+
 ```bash
 helm upgrade bmh-generator deploy/helm/bmh-generator-operator -n metal3-system
 ```
 
 **Via standalone ConfigMap:**
+
 ```bash
 # Edit deploy/configmap-server-profiles.yaml, append entry, then:
 kubectl apply -f deploy/configmap-server-profiles.yaml
 kubectl rollout restart deployment/bmh-generator-operator -n metal3-system
 ```
 
-### Local Development
+### Local Development Override
 
 ```bash
 # Point to a local profiles file instead of the ConfigMap mount
@@ -412,23 +435,31 @@ kubectl logs -n metal3-system -l app.kubernetes.io/name=bmh-generator-operator |
 
 ### Common Issues
 
-**1. "No valid configuration found"**
+#### 1. "No valid configuration found"
+
 - Ensure at least one vendor is configured with BMC credentials
 - Check: `kubectl logs ... | grep "Configured systems"`
 
-**2. "Server not found"**
-- Verify server name matches exactly
-- Check vendor annotation is correct
+#### 2. "Server not found"
+
+- Verify server name matches exactly in the management system
+- Check `spec.server_vendor` is set correctly (HP, DELL, or CISCO)
 - Review search logs: `kubectl logs ... | grep "Searching"`
 
-**3. "Buffered instead of created"**
-- Check available count: `kubectl get bmh -A -o json | jq '...'`
+#### 3. "Buffered instead of created"
+
+- Check available count: `kubectl get bmh -A -o json | jq '[.items[] | select(.status.provisioning.state != "provisioned")] | length'`
 - Wait for buffer check (30s interval)
 - Or increase `MAX_AVAILABLE_SERVERS`
 
-**4. Compilation/Import errors**
-- Operator now uses lazy imports to avoid circular dependencies
+#### 4. "spec.networkConfig requires both nicName and macIndex"
+
+- You provided only one of the two. Either set both or remove both.
+
+#### 5. Compilation/Import errors
+
 - Check Python version is 3.9+
+- Run: `python3 -m py_compile src/*.py`
 
 ## Development
 
@@ -436,7 +467,7 @@ kubectl logs -n metal3-system -l app.kubernetes.io/name=bmh-generator-operator |
 
 ```bash
 # Clone repository
-git clone https://github.com/roiblum1/BareMetalHostUCS.git
+git clone git@github.com:team-redbull/BareMetalHostUCS.git
 cd BareMetalHostUCS
 
 # Install dependencies
@@ -455,15 +486,12 @@ kopf run --liveness=http://0.0.0.0:8080/healthz src/operator_bmh_gen.py --all-na
 ### Build Container
 
 ```bash
-# Build
+# Build (podman recommended for cross-arch builds)
+podman build --platform linux/amd64 -t bmh-generator-operator:dev .
+podman push bmh-generator-operator:dev
+
+# Or with docker
 docker build -t bmh-generator-operator:dev .
-
-# Or with podman
-podman build -t bmh-generator-operator:dev .
-
-# Test in minikube
-minikube image load bmh-generator-operator:dev
-kubectl run test --image=bmh-generator-operator:dev --image-pull-policy=Never
 ```
 
 ### Testing
@@ -496,7 +524,7 @@ Two separate credential sets:
    - `UCS_CENTRAL_USERNAME` / `UCS_CENTRAL_PASSWORD`
    - `OME_USERNAME` / `OME_PASSWORD`
 
-2. **BMC**: Used by Metal3/Ironic to provision servers
+1. **BMC**: Used by Metal3/Ironic to provision servers
    - `HP_BMC_USERNAME` / `HP_BMC_PASSWORD`
    - `CISCO_BMC_USERNAME` / `CISCO_BMC_PASSWORD`
    - `DELL_BMC_USERNAME` / `DELL_BMC_PASSWORD`
@@ -504,9 +532,10 @@ Two separate credential sets:
 ### Strategy Pattern
 
 Each vendor implements `ServerStrategy`:
-- `HPServerStrategy` - HP OneView integration
-- `CiscoServerStrategy` - UCS Central/Manager integration
-- `DellServerStrategy` - Dell OME integration
+
+- `HPServerStrategy` — HP OneView integration
+- `CiscoServerStrategy` — UCS Central/Manager integration
+- `DellServerStrategy` — Dell OME integration
 
 ## Security
 
@@ -520,10 +549,10 @@ Each vendor implements `ServerStrategy`:
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1. Create a feature branch (`git checkout -b feature/amazing-feature`)
+1. Commit your changes (`git commit -m 'Add amazing feature'`)
+1. Push to the branch (`git push origin feature/amazing-feature`)
+1. Open a Pull Request
 
 ## License
 
@@ -532,14 +561,14 @@ Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 ## Support
 
 - **Documentation**: See [CLAUDE.md](CLAUDE.md) for development guide
-- **Issues**: [GitHub Issues](https://github.com/roiblum1/BareMetalHostUCS/issues)
+- **Issues**: [GitHub Issues](https://github.com/team-redbull/BareMetalHostUCS/issues)
 - **Logs**: Check operator logs for detailed error messages
 
 ---
 
-**Maintained by**: Roi Blum  
-**Team**: Red Bull Technology  
-**Repository**: https://github.com/team-redbull/BareMetalHostUCS
+**Maintained by**: Roi Blum
+**Team**: Red Bull Technology
+**Repository**: [github.com/team-redbull/BareMetalHostUCS](https://github.com/team-redbull/BareMetalHostUCS)
 
 ---
 
