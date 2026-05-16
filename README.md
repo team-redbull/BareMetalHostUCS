@@ -543,5 +543,14 @@ Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 
 ---
 
-**Maintained by**: Roi Blum
-**Repository**: https://github.com/roiblum1/BareMetalHostUCS
+**Maintained by**: Roi Blum  
+**Team**: Red Bull Technology  
+**Repository**: https://github.com/team-redbull/BareMetalHostUCS
+
+---
+
+## Credits
+
+Designed, implemented, and maintained by **Roi Blum** as part of the Red Bull Technology infrastructure team.
+
+![Credits](credits.jpeg)
