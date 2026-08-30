@@ -1,3 +1,7 @@
+# vlanId under networkConfig is REQUIRED for every vendor — the operator creates a
+# bonded (802.3ad) NMStateConfig for all of them. Bond members come from the server
+# profile ConfigMap unless overridden per-host with nicNames + macIndices.
+
 # Example 1: HP Server
 apiVersion: infra.example.com/v1alpha1
 kind: BareMetalHostGenerator
@@ -7,10 +11,12 @@ metadata:
 spec:
   serverName: ocp4-roi-rf-compute-01  # Server name in HP OneView
   infraEnv: "ocp4-roi-infraenv"        # Required: InfraEnv for agent-based installation
-  server_vendor: HP                    # HP, DELL, or CISCO (case-insensitive)
+  server_vendor: HP                    # HP, DELL, CISCO, or INTERSIGHT (case-insensitive)
+  networkConfig:
+    vlanId: 24                         # Required for all vendors
 
 ---
-# Example 2: Dell Server with VLAN
+# Example 2: Dell Server
 apiVersion: infra.example.com/v1alpha1
 kind: BareMetalHostGenerator
 metadata:
@@ -21,10 +27,10 @@ spec:
   infraEnv: "classic-baremetal"      # Required: InfraEnv name
   server_vendor: DELL
   networkConfig:
-    vlanId: 24                       # Required for Dell; triggers NMStateConfig creation
+    vlanId: 24                       # Required for all vendors
 
 ---
-# Example 3: Dell Server with vlanId + NIC/MAC override
+# Example 3: Dell Server with per-host bonded NIC/MAC override
 apiVersion: infra.example.com/v1alpha1
 kind: BareMetalHostGenerator
 metadata:
@@ -35,9 +41,9 @@ spec:
   infraEnv: "classic-baremetal"
   server_vendor: DELL
   networkConfig:
-    vlanId: 24                       # Required for Dell
-    nicName: "ens5f0np0"            # Optional: overrides profile lookup — must pair with macIndex
-    macIndex: "3"                   # Optional: 0-based index into interface list
+    vlanId: 24
+    nicNames: ["ens5f0np0", "ens5f1np1"]  # bond members (overrides profile lookup)
+    macIndices: ["3", "4"]                # each: "first", "last", or 0-based integer
 
 ---
 # Example 4: Cisco UCS Server
@@ -51,6 +57,22 @@ spec:
   namespace: "baremetal"             # Optional: target namespace for BareMetalHost
   infraEnv: "my-infraenv"            # Required: InfraEnv name
   server_vendor: CISCO
+  networkConfig:
+    vlanId: 30                       # Required for all vendors
   labels:                            # Optional: additional labels for BareMetalHost
     environment: "production"
     cluster: "my-cluster"
+
+---
+# Example 5: Cisco Intersight Server
+apiVersion: infra.example.com/v1alpha1
+kind: BareMetalHostGenerator
+metadata:
+  name: intersight-server-01
+  namespace: default
+spec:
+  serverName: "my-intersight-server"  # Server name in Cisco Intersight
+  infraEnv: "my-infraenv"             # Required: InfraEnv name
+  server_vendor: INTERSIGHT
+  networkConfig:
+    vlanId: 30                        # Required for all vendors

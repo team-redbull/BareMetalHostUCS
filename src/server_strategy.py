@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Tuple, Dict, Type
+from typing import Optional, Tuple, Dict, Type, List
 import requests
 from urllib3 import disable_warnings
 from urllib3.exceptions import InsecureRequestWarning
@@ -14,6 +14,7 @@ class ServerType(Enum):
     HP = "hp"
     DELL = "dell"
     CISCO = "cisco"
+    INTERSIGHT = "intersight"
     UNKNOWN = "unknown"
 
 class ServerStrategy(ABC):
@@ -35,8 +36,21 @@ class ServerStrategy(ABC):
         pass
     
     @abstractmethod
-    def get_server_info(self, server_name: str) -> Tuple[Optional[str], Optional[str]]:
-        """Retrieve server information such as MAC and BMC address."""
+    def get_server_info(
+        self, server_name: str, mac_indices: Optional[List[str]] = None
+    ) -> Tuple[List[str], Optional[str]]:
+        """Retrieve (ordered list of NIC MAC addresses, BMC/management IP).
+
+        Args:
+            server_name: server to look up in the management system.
+            mac_indices: which NIC MACs to return ("first"/"last"/integer specs).
+                One entry per bond member. When None/empty, the strategy falls
+                back to the server's profile.
+
+        Returns:
+            (macs, ip) where macs is ordered and parallel to the resolved
+            nic_names. Returns ([], None) when the server is not found.
+        """
         pass
     
     @abstractmethod
@@ -52,9 +66,10 @@ class ServerTypeDetector:
     # Ordered list of (substring, ServerType) checked against the lowercase server name.
     # First match wins. Extend this list to support new naming conventions.
     _NAME_PATTERNS = [
-        ("hp",    ServerType.HP),
-        ("dell",  ServerType.DELL),
-        ("cisco", ServerType.CISCO),
+        ("hp",         ServerType.HP),
+        ("dell",       ServerType.DELL),
+        ("intersight", ServerType.INTERSIGHT),
+        ("cisco",      ServerType.CISCO),
     ]
     _DEFAULT_TYPE = ServerType.CISCO
 
@@ -89,11 +104,13 @@ class ServerStrategyFactory:
             from src.hp_server_strategy import HPServerStrategy
             from src.dell_server_strategy import DellServerStrategy
             from src.ucs_server_strategy import CiscoServerStrategy
+            from src.intersight_server_strategy import IntersightServerStrategy
 
             cls._strategies = {
                 ServerType.HP: HPServerStrategy,
                 ServerType.DELL: DellServerStrategy,
                 ServerType.CISCO: CiscoServerStrategy,
+                ServerType.INTERSIGHT: IntersightServerStrategy,
             }
 
     @classmethod

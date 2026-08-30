@@ -4,22 +4,31 @@ metadata:
   name: bmh-server-profiles
   namespace: metal3-system
 data:
-  # Server type → NIC name and MAC-index profiles.
+  # Server type → bonded NIC profiles.
   # Patterns are matched case-insensitively (first match wins).
+  #
+  # nic_names  : OS interface names for the bond members (in order).
+  # mac_indices: how to pick each member's MAC from the management system —
+  #              "first", "last", or a 0-based integer. Parallel to nic_names.
+  #
+  # Provide TWO entries in each list to build an 802.3ad (LACP) bond. Provide a
+  # single entry for a non-bonded (single-NIC) host. The lists must be equal
+  # length. Adjust the placeholder NIC names below to match your hardware.
+  #
   # To add a new server type, append an entry and:
   #   kubectl apply -f deploy/configmap-server-profiles.yaml
   #   kubectl rollout restart deployment/bmh-generator-operator -n metal3-system
   profiles.yaml: |
     profiles:
       - pattern: "h100"
-        nic_name: "ens8f0np0"
-        mac_index: "2"          # 3rd NIC (0-based index)
+        nic_names: ["ens8f0np0", "ens8f1np1"]
+        mac_indices: ["2", "3"]
       - pattern: "h200"
-        nic_name: "ens33f0np0"
-        mac_index: "2"
+        nic_names: ["ens33f0np0", "ens33f1np1"]
+        mac_indices: ["2", "3"]
       - pattern: "10tb-"
-        nic_name: "ens2f0np0"
-        mac_index: "last"       # last interface / last port / last partition
+        nic_names: ["ens2f0np0", "ens2f1np1"]
+        mac_indices: ["last", "first"]
       - default: true
-        nic_name: "eno12399np0"
-        mac_index: "first"      # first interface / first port / first partition
+        nic_names: ["eno12399np0", "eno12409np1"]
+        mac_indices: ["first", "last"]

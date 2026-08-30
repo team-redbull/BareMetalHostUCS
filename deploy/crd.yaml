@@ -33,23 +33,27 @@ spec:
                 description: "Additional labels to apply to the BareMetalHost"
               server_vendor:
                 type: string
-                pattern: "(?i)^(HP|DELL|CISCO)$"
-                description: "Server vendor type: HP, DELL, or CISCO (case-insensitive)."
+                pattern: "(?i)^(HP|DELL|CISCO|INTERSIGHT)$"
+                description: "Server vendor type: HP, DELL, CISCO, or INTERSIGHT (case-insensitive)."
               networkConfig:
                 type: object
-                description: "Network configuration for this host. vlanId is required for Dell servers. nicName and macIndex are optional overrides and must be provided together."
+                description: "Network configuration for this host. vlanId is REQUIRED for all vendors. nicNames and macIndices are optional overrides for the bonded NICs and must be provided together with equal length (one entry per bond member)."
                 properties:
                   vlanId:
                     type: integer
                     minimum: 1
                     maximum: 4094
-                    description: "VLAN ID for Dell NMStateConfig (1-4094). Required for Dell servers."
-                  nicName:
-                    type: string
-                    description: "Network interface name (e.g. ens8f0np0). Overrides server profile lookup. Must be set with macIndex."
-                  macIndex:
-                    type: string
-                    description: "MAC address selection — 'first', 'last', or 0-based integer (e.g. '2'). Overrides server profile lookup. Must be set with nicName."
+                    description: "VLAN ID for the NMStateConfig (1-4094). Required for all vendors."
+                  nicNames:
+                    type: array
+                    items:
+                      type: string
+                    description: "Bond member NIC names (e.g. [ens8f0np0, ens8f1np1]). Overrides server profile lookup. Must be set with macIndices (same length)."
+                  macIndices:
+                    type: array
+                    items:
+                      type: string
+                    description: "MAC selection per bond member — each 'first', 'last', or 0-based integer (e.g. ['0','1']). Parallel to nicNames."
           status:
             type: object
             properties:
@@ -65,7 +69,12 @@ spec:
                 description: "ISO timestamp when the server was buffered"
               macAddress:
                 type: string
-                description: "MAC address discovered from management system"
+                description: "Primary MAC address (bond boot NIC) discovered from management system"
+              macAddresses:
+                type: array
+                items:
+                  type: string
+                description: "All NIC MAC addresses (bond members) discovered from management system"
               ipmiAddress:
                 type: string
                 description: "IPMI/management IP address discovered"
@@ -80,13 +89,17 @@ spec:
                 description: "Server vendor type detected or specified (HP, DELL, CISCO)"
               vlanId:
                 type: string
-                description: "VLAN ID for Dell servers"
-              selectedNicName:
-                type: string
-                description: "Effective NIC name used for this host (from spec.networkConfig or server profile)"
-              selectedMacIndex:
-                type: string
-                description: "Effective MAC index used for this host (from spec.networkConfig or server profile)"
+                description: "VLAN ID applied to the NMStateConfig"
+              selectedNicNames:
+                type: array
+                items:
+                  type: string
+                description: "Effective NIC names used for this host (from spec.networkConfig or server profile)"
+              selectedMacIndices:
+                type: array
+                items:
+                  type: string
+                description: "Effective MAC indices used for this host (from spec.networkConfig or server profile)"
     subresources:
       status: {}
     additionalPrinterColumns:

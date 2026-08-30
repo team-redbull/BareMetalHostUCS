@@ -136,6 +136,26 @@ spec:
               key: DELL_BMC_PASSWORD
         {{- end }}
 
+        {{- if .Values.ciscoIntersight.enabled }}
+        # Cisco Intersight configuration
+        - name: INTERSIGHT_API_ENDPOINT
+          value: {{ .Values.ciscoIntersight.apiEndpoint | quote }}
+        - name: INTERSIGHT_API_KEY_ID
+          value: {{ .Values.ciscoIntersight.apiKeyId | quote }}
+        - name: INTERSIGHT_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "bmh-generator-operator.fullname" . }}-credentials
+              key: INTERSIGHT_API_SECRET
+        - name: INTERSIGHT_BMC_USERNAME
+          value: {{ .Values.ciscoIntersight.bmc.username | quote }}
+        - name: INTERSIGHT_BMC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "bmh-generator-operator.fullname" . }}-credentials
+              key: INTERSIGHT_BMC_PASSWORD
+        {{- end }}
+
         {{- with .Values.extraEnv }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

@@ -2,12 +2,13 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Tuple, Dict, Type
+from typing import Optional, Tuple, Dict, Type, List
 import requests
 from urllib3 import disable_warnings
 from urllib3.exceptions import InsecureRequestWarning
 from src.server_strategy import ServerStrategy
 from src.config import hp_strategy_logger
+from src.server_profile_config import select_macs
 
 disable_warnings(InsecureRequestWarning)
 logger = hp_strategy_logger
@@ -64,9 +65,11 @@ class HPServerStrategy(ServerStrategy):
             
             logger.info("Successfully connected to OneView")
     
-    def get_server_info(self, server_name: str) -> Tuple[Optional[str], Optional[str]]:
+    def get_server_info(
+        self, server_name: str, mac_indices: Optional[List[str]] = None
+    ) -> Tuple[List[str], Optional[str]]:
         self.ensure_connected()
-        
+
         self._cache = []
         next_page_uri = f"{self.base_url}/rest/server-profiles?count=-1"
         
@@ -77,8 +80,8 @@ class HPServerStrategy(ServerStrategy):
                 page_data = response.json()
             except Exception as e:
                 logger.error(f"Failed to retrieve server profiles: {e}")
-                return None, None
-            
+                return [], None
+
             self._cache.extend(page_data.get("members", []))
             next_page_uri = page_data.get("nextPageUri")
             if next_page_uri:
@@ -102,20 +105,27 @@ class HPServerStrategy(ServerStrategy):
                     server_hardware = response.json()
                 except Exception as e:
                     logger.error(f"Failed to retrieve server hardware details: {e}")
-                    return None, None
-                
+                    return [], None
+
                 ilo_ip = self._extract_hp_management_ip(server_hardware)
                 if (not ilo_ip):
                     logger.error(f"Could not find iLO IP address for server {server_name}")
-                    return None, None
-                mac_address = self._extract_hp_mac_address(server_hardware)
-                if (not mac_address):
-                    logger.error(f"Could not find MAC address for server {server_name}")
-                    return None, None
-                if mac_address and ilo_ip:
-                    return mac_address, ilo_ip 
+                    return [], None
+                ordered_macs = self._extract_hp_mac_addresses(server_hardware)
+                if not ordered_macs:
+                    logger.error(f"Could not find any MAC address for server {server_name}")
+                    return [], None
+                macs = select_macs(ordered_macs, mac_indices, server_name)
+                if not macs:
+                    logger.error(
+                        f"Failed to select requested NIC MAC(s) for server {server_name} "
+                        f"from {len(ordered_macs)} available"
+                    )
+                    return [], None
+                logger.info(f"Selected {len(macs)} MAC(s) for {server_name}: {macs}, iLO: {ilo_ip}")
+                return macs, ilo_ip
         logger.error(f"Server {server_name} not found in OneView")
-        return None, None
+        return [], None
     
     def _extract_hp_management_ip(self, server):
         if 'mpHostInfo' in server and 'mpIpAddresses' in server['mpHostInfo']:
@@ -124,15 +134,18 @@ class HPServerStrategy(ServerStrategy):
                     return ip_address['address']
         return None
     
-    def _extract_hp_mac_address(self, server_hardware):
-        port_map =  server_hardware.get("portMap", {})
+    def _extract_hp_mac_addresses(self, server_hardware) -> List[str]:
+        """Return all real (non-``00``-prefixed) Ethernet NIC MACs, in port order."""
+        port_map = server_hardware.get("portMap", {})
         device_slots = port_map.get("deviceSlots", [])
-        
+
+        macs: List[str] = []
         for slot in device_slots:
             for port in slot.get("physicalPorts", []):
-                if port.get("type") == "Ethernet" and not port.get('mac', '').startswith('00'):
-                    return port.get("mac")
-        return None
+                mac = port.get("mac", "")
+                if port.get("type") == "Ethernet" and mac and not mac.startswith("00"):
+                    macs.append(mac)
+        return macs
     
     def clear_cache(self):
         self._cache = None

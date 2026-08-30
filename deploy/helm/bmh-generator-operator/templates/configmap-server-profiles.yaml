@@ -16,6 +16,12 @@ data:
         {{- if .default }}
         default: true
         {{- end }}
-        nic_name: {{ .nic_name | quote }}
-        mac_index: {{ .mac_index | quote }}
+        nic_names:
+        {{- range .nic_names }}
+          - {{ . | quote }}
+        {{- end }}
+        mac_indices:
+        {{- range .mac_indices }}
+          - {{ . | quote }}
+        {{- end }}
     {{- end }}

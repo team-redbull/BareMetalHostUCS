@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional, Tuple
 from src.server_strategy import ServerType
 import yaml
 from src.config import bmh_logger, BMHCRD, NMStateConfigCRD
-from src.server_profile_config import lookup_profile
 
 
 # ============================================================================
@@ -40,8 +39,12 @@ def get_bmc_credentials(vendor: str) -> Tuple[str, str]:
         username = os.getenv('CISCO_BMC_USERNAME')
         password = os.getenv('CISCO_BMC_PASSWORD')
         vendor_name = "CISCO"
+    elif vendor_upper == "INTERSIGHT":
+        username = os.getenv('INTERSIGHT_BMC_USERNAME')
+        password = os.getenv('INTERSIGHT_BMC_PASSWORD')
+        vendor_name = "INTERSIGHT"
     else:
-        raise ValueError(f"Unknown vendor: {vendor}. Must be HP, DELL, or CISCO")
+        raise ValueError(f"Unknown vendor: {vendor}. Must be HP, DELL, CISCO, or INTERSIGHT")
 
     if not username or not password:
         raise ValueError(
@@ -73,6 +76,10 @@ def get_bmc_address(vendor: str, ip_address: str) -> str:
         return f"idrac-virtualmedia://{ip_address}/redfish/v1/Systems/System.Embedded.1"
     elif vendor_upper == "CISCO":
         return f"ipmi://{ip_address}:623"
+    elif vendor_upper == "INTERSIGHT":
+        # Cisco Intersight-managed UCS servers expose Redfish on the CIMC.
+        # NOTE: confirm the exact Systems path against your CIMC firmware.
+        return f"redfish-virtualmedia://{ip_address}/redfish/v1/Systems/1"
     else:
         # Default to IPMI if vendor is unknown
         return f"ipmi://{ip_address}"
@@ -93,7 +100,7 @@ def get_secret_name(vendor: str, server_name: str) -> str:
     """
     vendor_lower = vendor.lower()
 
-    if vendor_lower in ["hp", "dell", "cisco"]:
+    if vendor_lower in ["hp", "dell", "cisco", "intersight"]:
         return f"{vendor_lower}-cred-{server_name}"
     else:
         return f"bmc-cred-{server_name}"
@@ -102,28 +109,6 @@ def get_secret_name(vendor: str, server_name: str) -> str:
 class YamlGenerator:
     def __init__(self):
         self.bmh_logger = bmh_logger
-
-    def _get_interface_name(self, server_name: str, nic_name_override: Optional[str] = None) -> str:
-        """
-        Determine the network interface name based on server type.
-
-        If nic_name_override is provided it is used directly, bypassing profile lookup.
-
-        Args:
-            server_name: Name of the server
-            nic_name_override: Optional explicit NIC name from spec.networkConfig.nicName
-
-        Returns:
-            Interface name string
-        """
-        if nic_name_override:
-            self.bmh_logger.info(
-                f"Server '{server_name}' → nic_name='{nic_name_override}' (spec override)"
-            )
-            return nic_name_override
-        profile = lookup_profile(server_name)
-        self.bmh_logger.info(f"Server '{server_name}' → nic_name='{profile['nic_name']}'")
-        return profile["nic_name"]
 
     def validate_inputs(self, mac: str, ip: str) -> None:
         """Validate MAC and IP address formats"""
@@ -286,83 +271,140 @@ class YamlGenerator:
         self.bmh_logger.info(f"Successfully generated BMC secret definition for {secret_name}")
         return secret_data
     
-    def generate_nmstate_config(self, name: str, namespace: str, macAddress: str, infra_env: str, vlanId: str,
-                                nic_name_override: Optional[str] = None) -> Dict[str, Any]:
-        """Generate NMStateConfig resource definition"""
-        self.bmh_logger.info(f"Generating NMStateConfig for {name} in namespace {namespace}")
-        self.bmh_logger.info(f"MacAddress: {macAddress}")
-
-        # Validate VLAN ID
+    @staticmethod
+    def _validate_vlan_id(vlanId: str) -> int:
+        """Validate and return the VLAN id as an int (1-4094)."""
         if not vlanId or vlanId == "None" or str(vlanId).strip() == "":
             raise ValueError(f"VLAN ID is required for NMStateConfig but got: {vlanId}")
-
-        # Validate VLAN ID is numeric and convert to integer
         try:
             vlan_id_int = int(vlanId)
-            if vlan_id_int < 1 or vlan_id_int > 4094:
-                raise ValueError(f"VLAN ID must be between 1 and 4094, got: {vlanId}")
-        except ValueError as e:
+        except (TypeError, ValueError) as e:
             raise ValueError(f"VLAN ID must be a valid integer, got: {vlanId}") from e
+        if vlan_id_int < 1 or vlan_id_int > 4094:
+            raise ValueError(f"VLAN ID must be between 1 and 4094, got: {vlanId}")
+        return vlan_id_int
 
-        # Determine interface name based on server type (or spec override)
-        interface_name = self._get_interface_name(name, nic_name_override)
-        self.bmh_logger.info(f"Configuring the nmstateconfig with {interface_name}.{vlan_id_int}")
+    @staticmethod
+    def _ethernet_iface(nic_name: str, mac: str) -> Dict[str, Any]:
+        """A physical ethernet member interface with IP disabled."""
+        return {
+            "ipv4": {"enabled": False},
+            "ipv6": {"enabled": False},
+            "mac-address": mac,
+            "name": nic_name,
+            "state": "up",
+            "type": "ethernet",
+        }
+
+    @staticmethod
+    def _vlan_iface(base_iface: str, vlan_id_int: int) -> Dict[str, Any]:
+        """The DHCP VLAN interface riding on top of base_iface (a NIC or a bond)."""
+        return {
+            "ipv4": {
+                "auto-dns": True,
+                "auto-gateway": True,
+                "auto-routes": True,
+                "dhcp": True,
+                "enabled": True,
+            },
+            "ipv6": {"autoconf": False, "dhcp": False, "enabled": False},
+            "name": f"{base_iface}.{vlan_id_int}",
+            "state": "up",
+            "type": "vlan",
+            "vlan": {"base-iface": base_iface, "id": vlan_id_int},
+        }
+
+    @staticmethod
+    def _bond_options(bond_mode: str) -> Dict[str, str]:
+        options = {"miimon": "100"}
+        if bond_mode == "802.3ad":
+            options["lacp_rate"] = "fast"
+        return options
+
+    def generate_nmstate_config(self, name: str, namespace: str, mac_addresses, nic_names,
+                                infra_env: str, vlanId: str, bond_name: str = "bond0",
+                                bond_mode: str = "802.3ad") -> Dict[str, Any]:
+        """Generate an NMStateConfig resource.
+
+        With two (or more) NICs it builds a bond (default 802.3ad/LACP) of the
+        members with the VLAN riding on the bond. With a single NIC it falls back
+        to the original non-bonded shape (VLAN directly on the NIC).
+
+        Args:
+            mac_addresses: NIC MAC addresses (parallel to nic_names).
+            nic_names: OS interface names for each bond member (parallel to macs).
+            bond_name: name of the bond interface (when bonding).
+            bond_mode: link-aggregation mode (e.g. "802.3ad", "active-backup").
+        """
+        self.bmh_logger.info(f"Generating NMStateConfig for {name} in namespace {namespace}")
+        self.bmh_logger.info(f"MACs: {mac_addresses}, NICs: {nic_names}")
+
+        vlan_id_int = self._validate_vlan_id(vlanId)
+
+        if not mac_addresses or not nic_names:
+            raise ValueError(
+                f"NMStateConfig for {name} requires at least one NIC and MAC; "
+                f"got nic_names={nic_names}, mac_addresses={mac_addresses}"
+            )
+        if len(mac_addresses) != len(nic_names):
+            raise ValueError(
+                f"NMStateConfig for {name}: nic_names ({len(nic_names)}) and "
+                f"mac_addresses ({len(mac_addresses)}) must be the same length"
+            )
+
+        # Reuse the existing MAC format validation (ip is irrelevant here).
+        MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+        for mac in mac_addresses:
+            if not mac or not MAC_RE.fullmatch(mac):
+                raise ValueError(f"Invalid MAC address format for {name}: {mac!r}")
+
+        if len(nic_names) == 1:
+            # Single interface — preserve the original non-bonded layout.
+            iface, mac = nic_names[0], mac_addresses[0]
+            self.bmh_logger.info(f"Configuring single-interface nmstateconfig with {iface}.{vlan_id_int}")
+            config_interfaces = [
+                self._ethernet_iface(iface, mac),
+                self._vlan_iface(iface, vlan_id_int),
+            ]
+            spec_interfaces = [{"macAddress": mac, "name": iface}]
+        else:
+            # Two (or more) interfaces — bond them and put the VLAN on the bond.
+            self.bmh_logger.info(
+                f"Configuring bonded nmstateconfig {bond_name} (mode={bond_mode}) "
+                f"over {nic_names} with VLAN {vlan_id_int}"
+            )
+            members = [self._ethernet_iface(n, m) for n, m in zip(nic_names, mac_addresses)]
+            bond_iface = {
+                "ipv4": {"enabled": False},
+                "ipv6": {"enabled": False},
+                "name": bond_name,
+                "state": "up",
+                "type": "bond",
+                "link-aggregation": {
+                    "mode": bond_mode,
+                    "options": self._bond_options(bond_mode),
+                    "port": list(nic_names),
+                },
+            }
+            config_interfaces = members + [bond_iface, self._vlan_iface(bond_name, vlan_id_int)]
+            spec_interfaces = [
+                {"macAddress": m, "name": n} for n, m in zip(nic_names, mac_addresses)
+            ]
+
         nmstate_data = {
             "apiVersion": f"{NMStateConfigCRD.GROUP}/{NMStateConfigCRD.VERSION}",
             "kind": NMStateConfigCRD.KIND,
             "metadata": {
-                "labels": {
-                    "infraenvs.agent-install.openshift.io": infra_env
-                },
+                "labels": {"infraenvs.agent-install.openshift.io": infra_env},
                 "name": f"nmstate-config-{name}",
-                "namespace": namespace
+                "namespace": namespace,
             },
             "spec": {
-                "config": {
-                    "interfaces": [
-                        {
-                            "ipv4": {
-                                "enabled": False
-                            },
-                            "ipv6": {
-                                "enabled": False
-                            },
-                            "mac-address": macAddress,
-                            "name": f"{interface_name}",
-                            "state": "up",
-                            "type": "ethernet"
-                        },
-                        {
-                            "ipv4":{
-                                "auto-dns": True,
-                                "auto-gateway": True,
-                                "auto-routes": True,
-                                "dhcp": True,
-                                "enabled": True
-                            },
-                            "ipv6": {
-                                "autoconf": False,
-                                "dhcp": False,
-                                "enabled": False
-                            },
-                            "name": f"{interface_name}.{vlan_id_int}",
-                            "state": "up",
-                            "type": "vlan",
-                            "vlan": {
-                                "base-iface": f"{interface_name}",
-                                "id": vlan_id_int
-                            }
-                        }
-                    ]
-                }, 
-                "interfaces": [
-                    {
-                        "macAddress": macAddress,
-                        "name": f"{interface_name}"
-                    }
-                ]
-            }
+                "config": {"interfaces": config_interfaces},
+                "interfaces": spec_interfaces,
+            },
         }
+
         self.validate_yaml_format(nmstate_data)
         self.bmh_logger.info(f"Successfully generated NMStateConfig definition for {name}")
         return nmstate_data

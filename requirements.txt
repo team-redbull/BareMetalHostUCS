@@ -5,3 +5,5 @@ pyyaml==6.0.1
 ucsmsdk
 ucscsdk
 urllib3>=1.24.2,<2.0
+# Cisco Intersight SDK (only needed when an Intersight vendor is configured)
+intersight

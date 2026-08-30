@@ -66,6 +66,9 @@ dell_strategy_logger.setLevel(get_log_level())
 cisco_strategy_logger = logging.getLogger('cisco_strategy')
 cisco_strategy_logger.setLevel(get_log_level())
 
+intersight_strategy_logger = logging.getLogger('intersight_strategy')
+intersight_strategy_logger.setLevel(get_log_level())
+
 
 # ============================================================================
 # Buffer Management Configuration
