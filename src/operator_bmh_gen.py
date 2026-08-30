@@ -16,7 +16,7 @@ from src.openshift_utils import OpenShiftUtils
 from src.yaml_generators import YamlGenerator
 from src.unified_server_client import UnifiedServerClient, initialize_unified_client
 from src.config import operator_logger, buffer_logger, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase
-from src.server_profile_config import resolve_nic_and_mac_index
+from src.server_profile_config import resolve_nics_and_mac_indices
 
 # Initialize YAML generator
 yaml_generator = YamlGenerator()
@@ -49,20 +49,31 @@ disable_warnings(InsecureRequestWarning)
 
 def _extract_network_override(spec: Dict[str, Any], server_name: str):
     """
-    Return (nic_name_override, mac_index_override) from spec.networkConfig.
+    Return (nic_names_override, mac_indices_override) as parallel lists from
+    spec.networkConfig.nicNames / macIndices. Returns ([], []) when no override
+    is present.
 
-    Returns (None, None) when networkConfig is absent.
-    Raises kopf.PermanentError when only one of the two fields is set.
+    Raises kopf.PermanentError when the two are not provided together or have
+    mismatched lengths.
     """
     nc = spec.get('networkConfig') or {}
-    nic = nc.get('nicName') or None
-    idx = nc.get('macIndex') or None
-    if bool(nic) != bool(idx):
+    nic_names = nc.get('nicNames')
+    mac_indices = nc.get('macIndices')
+
+    nic_names = list(nic_names) if nic_names else []
+    mac_indices = [str(i) for i in mac_indices] if mac_indices else []
+
+    if bool(nic_names) != bool(mac_indices):
         raise kopf.PermanentError(
-            f"[{server_name}] spec.networkConfig requires both nicName and macIndex together, "
-            f"got nicName={nic!r}, macIndex={idx!r}"
+            f"[{server_name}] spec.networkConfig requires nicNames and macIndices together, "
+            f"got nicNames={nic_names!r}, macIndices={mac_indices!r}"
         )
-    return nic, idx
+    if nic_names and len(nic_names) != len(mac_indices):
+        raise kopf.PermanentError(
+            f"[{server_name}] spec.networkConfig nicNames ({len(nic_names)}) and "
+            f"macIndices ({len(mac_indices)}) must be the same length"
+        )
+    return nic_names, mac_indices
 
 
 @kopf.on.startup()
@@ -231,12 +242,14 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
         server_vendor = server_vendor.upper()
     vlan_id = (spec.get('networkConfig') or {}).get('vlanId')
     vlan_id = str(vlan_id) if vlan_id is not None else None
-    nic_name_override, mac_index_override = _extract_network_override(spec, server_name)
-    effective_nic, effective_mac_index = resolve_nic_and_mac_index(server_name, nic_name_override, mac_index_override)
-    if nic_name_override:
-        operator_logger.info(f"[{server_name}] networkConfig override: nicName={nic_name_override}, macIndex={mac_index_override}")
+    nic_names_override, mac_indices_override = _extract_network_override(spec, server_name)
+    effective_nics, effective_mac_indices = resolve_nics_and_mac_indices(
+        server_name, nic_names_override, mac_indices_override
+    )
+    if nic_names_override:
+        operator_logger.info(f"[{server_name}] networkConfig override: nicNames={nic_names_override}, macIndices={mac_indices_override}")
     else:
-        operator_logger.info(f"[{server_name}] resolved profile: nicName={effective_nic}, macIndex={effective_mac_index}")
+        operator_logger.info(f"[{server_name}] resolved profile: nicNames={effective_nics}, macIndices={effective_mac_indices}")
 
     vendor_msg = f"{server_vendor!r}" if server_vendor else "not specified — will auto-detect from server name"
     vlan_msg = f"{vlan_id!r}" if vlan_id else "not specified"
@@ -250,6 +263,12 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
         patch.status["phase"] = Phase.FAILED
         patch.status["message"] = f"infraEnv is required in the spec of BareMetalHostGenerator {name}"
         raise kopf.PermanentError(f"infraEnv is required in the spec of BareMetalHostGenerator {name}")
+
+    # vlanId is mandatory for every vendor (NMStateConfig is always generated).
+    if not vlan_id:
+        patch.status["phase"] = Phase.FAILED
+        patch.status["message"] = f"spec.networkConfig.vlanId is required for BareMetalHostGenerator {name}"
+        raise kopf.PermanentError(f"spec.networkConfig.vlanId is required for BareMetalHostGenerator {name}")
 
     # Validate unified_client before proceeding
     if unified_client is None:
@@ -267,12 +286,12 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
         # Run blocking network call in thread pool with timeout to avoid blocking event loop
         # Timeout after 60 seconds to prevent hanging handlers
         try:
-            mac_address, ip_address = await asyncio.wait_for(
+            mac_addresses, ip_address = await asyncio.wait_for(
                 asyncio.to_thread(
                     unified_client.get_server_info,
                     server_name,
                     server_vendor,
-                    mac_index_override
+                    effective_mac_indices
                 ),
                 timeout=60.0  # 60 second timeout
             )
@@ -282,13 +301,15 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
             patch.status["message"] = f"Timeout getting server info for {server_name} - request took longer than 60 seconds"
             raise kopf.PermanentError(f"Timeout getting server info for {server_name}")
 
-        if not mac_address or not ip_address:
+        if not mac_addresses or not ip_address:
             # Update status before raising error
             patch.status["phase"] = Phase.FAILED
             patch.status["message"] = f"Server {server_name} not found in any management system"
             raise kopf.PermanentError(f"Server {server_name} not found in any management system")
 
-        operator_logger.info(f"Found server {server_name} with MAC: {mac_address}, IP: {ip_address}")
+        # Primary MAC = the host's PXE/boot NIC used by Metal3 bootMACAddress.
+        mac_address = mac_addresses[0]
+        operator_logger.info(f"Found server {server_name} with MACs: {mac_addresses}, IP: {ip_address}")
 
         if not server_vendor:
             detected_type = unified_client._detector.detect(server_name)
@@ -298,10 +319,12 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
         # Check if should buffer or create immediately
         if await buffer_manager.is_to_buffer(
             server_name,
-            mac_address,
+            mac_addresses,
             ip_address,
             server_vendor,
             vlan_id,
+            effective_nics,
+            effective_mac_indices,
             namespace,
             name
         ):
@@ -311,8 +334,11 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
             patch.status["message"] = f"Server buffered - limit reached ({buffer_manager.MAX_AVAILABLE_SERVERS} available)"
             patch.status["bufferedAt"] = datetime.utcnow().isoformat() + "Z"
             patch.status["macAddress"] = mac_address
+            patch.status["macAddresses"] = mac_addresses
             patch.status["ipmiAddress"] = ip_address
             patch.status["serverVendor"] = server_vendor
+            patch.status["selectedNicNames"] = effective_nics
+            patch.status["selectedMacIndices"] = effective_mac_indices
             if vlan_id:
                 patch.status["vlanId"] = vlan_id
             return
@@ -344,23 +370,21 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
             custom_api, target_namespace, bmh, server_name
         )
 
-        # Create NMStateConfig for Dell servers
-        if server_vendor:
-            operator_logger.info(f"The VLAN ID is: {vlan_id}")
-            if server_vendor.upper() == "DELL" and vlan_id:
-                nmstate_config = yaml_generator.generate_nmstate_config(
-                    name=server_name,
-                    namespace=target_namespace,
-                    macAddress=mac_address,
-                    infra_env=infra_env,
-                    vlanId=vlan_id,
-                    nic_name_override=nic_name_override
-                )
-                # Run blocking Kubernetes API call in thread pool
-                await asyncio.to_thread(
-                    OpenShiftUtils.create_nmstate_config,
-                    custom_api, target_namespace, nmstate_config, server_name
-                )
+        # Create NMStateConfig for every vendor (bonded when two NICs resolve).
+        operator_logger.info(f"The VLAN ID is: {vlan_id}")
+        nmstate_config = yaml_generator.generate_nmstate_config(
+            name=server_name,
+            namespace=target_namespace,
+            mac_addresses=mac_addresses,
+            nic_names=effective_nics,
+            infra_env=infra_env,
+            vlanId=vlan_id,
+        )
+        # Run blocking Kubernetes API call in thread pool
+        await asyncio.to_thread(
+            OpenShiftUtils.create_nmstate_config,
+            custom_api, target_namespace, nmstate_config, server_name
+        )
 
         # Update status to Completed
         patch.status["phase"] = Phase.COMPLETED
@@ -368,11 +392,12 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
         patch.status["bmhName"] = server_name
         patch.status["bmhNamespace"] = target_namespace
         patch.status["macAddress"] = mac_address
+        patch.status["macAddresses"] = mac_addresses
         patch.status["ipmiAddress"] = ip_address
         patch.status["serverVendor"] = server_vendor
         patch.status["vlanId"] = vlan_id
-        patch.status["selectedNicName"] = effective_nic
-        patch.status["selectedMacIndex"] = effective_mac_index
+        patch.status["selectedNicNames"] = effective_nics
+        patch.status["selectedMacIndices"] = effective_mac_indices
 
         handler_duration = time.time() - handler_start_time
         operator_logger.info(f"[CREATE] Successfully completed BareMetalHost creation for: {server_name} (took {handler_duration:.2f}s)")
@@ -389,8 +414,9 @@ async def create_bmh(spec: Dict[str, Any], name: str, namespace: str, annotation
         patch.status["message"] = str(e)
 
         # Preserve MAC/IP if they were retrieved before error
-        if 'mac_address' in locals() and mac_address:
-            patch.status["macAddress"] = mac_address
+        if 'mac_addresses' in locals() and mac_addresses:
+            patch.status["macAddress"] = mac_addresses[0]
+            patch.status["macAddresses"] = mac_addresses
         if 'ip_address' in locals() and ip_address:
             patch.status["ipmiAddress"] = ip_address
         if 'server_vendor' in locals() and server_vendor:
@@ -464,10 +490,16 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
         server_vendor = spec.get('server_vendor')
         if server_vendor:
             server_vendor = server_vendor.upper()
-        nic_name_override, mac_index_override = _extract_network_override(spec, server_name)
-        effective_nic, effective_mac_index = resolve_nic_and_mac_index(server_name, nic_name_override, mac_index_override)
-        if nic_name_override:
-            operator_logger.info(f"[REDEPLOY] [{server_name}] networkConfig override: nicName={nic_name_override}, macIndex={mac_index_override}")
+        vlan_id = (spec.get('networkConfig') or {}).get('vlanId')
+        vlan_id = str(vlan_id) if vlan_id is not None else None
+        if not vlan_id:
+            raise kopf.PermanentError(f"spec.networkConfig.vlanId is required for {name}")
+        nic_names_override, mac_indices_override = _extract_network_override(spec, server_name)
+        effective_nics, effective_mac_indices = resolve_nics_and_mac_indices(
+            server_name, nic_names_override, mac_indices_override
+        )
+        if nic_names_override:
+            operator_logger.info(f"[REDEPLOY] [{server_name}] networkConfig override: nicNames={nic_names_override}, macIndices={mac_indices_override}")
 
         operator_logger.info(f"[REDEPLOY] Querying server info for: {server_name}")
 
@@ -476,19 +508,19 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
             raise kopf.PermanentError("Unified client not initialized - cannot query server info")
 
         # Use global unified client to get fresh server info (run in thread to avoid blocking)
-        mac_address, ipmi_address = await asyncio.to_thread(
-            unified_client.get_server_info, server_name, server_vendor, mac_index_override
+        mac_addresses, ipmi_address = await asyncio.to_thread(
+            unified_client.get_server_info, server_name, server_vendor, effective_mac_indices
         )
 
-        if not mac_address or not ipmi_address:
+        if not mac_addresses or not ipmi_address:
             raise kopf.PermanentError(f"Failed to retrieve server info for {server_name}")
 
-        operator_logger.info(f"[REDEPLOY] Retrieved server info - MAC: {mac_address}, IP: {ipmi_address}")
+        operator_logger.info(f"[REDEPLOY] Retrieved server info - MACs: {mac_addresses}, IP: {ipmi_address}")
 
         # Step 3: Recreate resources
         operator_logger.info(f"[REDEPLOY] Creating new resources for: {name}")
-        await create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
-                                   server_vendor, annotations, patch, nic_name_override)
+        await create_bmh_resources(spec, name, namespace, mac_addresses, ipmi_address,
+                                   server_vendor, annotations, patch, effective_nics)
 
         # Step 4: Remove redeploy annotation
         operator_logger.info(f"[REDEPLOY] Removing redeploy annotation from: {name}")
@@ -497,8 +529,8 @@ async def redeploy_bmh_resources(spec, status, name, namespace, annotations, pat
         # Step 5: Update status to Completed
         patch.status["phase"] = Phase.COMPLETED
         patch.status["message"] = "Resources successfully redeployed"
-        patch.status["selectedNicName"] = effective_nic
-        patch.status["selectedMacIndex"] = effective_mac_index
+        patch.status["selectedNicNames"] = effective_nics
+        patch.status["selectedMacIndices"] = effective_mac_indices
 
         handler_duration = time.time() - handler_start_time
         operator_logger.info(f"[REDEPLOY] Successfully completed redeploy for: {name} (took {handler_duration:.2f}s)")
@@ -524,7 +556,7 @@ async def delete_existing_resources(status, name, namespace):
     """
     Delete BMH, Secret, and NMStateConfig if they exist.
 
-    Note: NMStateConfig is only deleted for Dell servers (DELL vendor)
+    Note: NMStateConfig is created/deleted for every vendor.
     """
     bmh_name = status.get('bmhName')
     bmh_namespace = status.get('bmhNamespace')
@@ -536,15 +568,13 @@ async def delete_existing_resources(status, name, namespace):
 
     operator_logger.info(f"[REDEPLOY] Deleting resources: BMH={bmh_name}, Namespace={bmh_namespace}, Vendor={server_vendor}")
 
-    # Delete NMStateConfig (Dell servers only - other vendors don't use it)
-    if server_vendor and server_vendor.upper() == 'DELL':
-        await asyncio.to_thread(
-            OpenShiftUtils.delete_nmstate_config,
-            custom_api, bmh_namespace, bmh_name
-        )
-        operator_logger.info(f"[REDEPLOY] Deleted NMStateConfig: {bmh_name} (Dell server)")
-    else:
-        operator_logger.debug(f"[REDEPLOY] Skipping NMStateConfig deletion for {server_vendor} server")
+    # Delete NMStateConfig (created for every vendor). delete_nmstate_config()
+    # prepends the "nmstate-config-" prefix, so pass the bare server/bmh name.
+    await asyncio.to_thread(
+        OpenShiftUtils.delete_nmstate_config,
+        custom_api, bmh_namespace, bmh_name
+    )
+    operator_logger.info(f"[REDEPLOY] Deleted NMStateConfig: nmstate-config-{bmh_name}")
 
     # Delete Secret (all vendors)
     secret_name = f"{server_vendor.lower()}-cred-{bmh_name}" if server_vendor else f"bmc-cred-{bmh_name}"
@@ -592,18 +622,20 @@ async def remove_redeploy_annotation(name, namespace):
         # Don't raise - this is a cleanup operation
 
 
-async def create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
-                               server_vendor, annotations, patch, nic_name_override=None):
+async def create_bmh_resources(spec, name, namespace, mac_addresses, ipmi_address,
+                               server_vendor, annotations, patch, nic_names=None):
     """
-    Create BMH, Secret, and NMStateConfig resources.
-
-    Note: NMStateConfig is only created for Dell servers when spec.networkConfig.vlanId is set.
+    Create BMH, Secret, and NMStateConfig resources (NMStateConfig for all vendors).
     """
     target_namespace = spec.get('namespace', namespace)
     infra_env = spec.get('infraEnv')
     labels = spec.get('labels', {})
     vlan_id = (spec.get('networkConfig') or {}).get('vlanId')
     vlan_id = str(vlan_id) if vlan_id is not None else None
+    if not nic_names:
+        nic_names, _ = resolve_nics_and_mac_indices(spec.get('serverName', name))
+    # Primary MAC = the host's PXE/boot NIC used by Metal3 bootMACAddress.
+    mac_address = mac_addresses[0]
 
     operator_logger.info(f"[REDEPLOY] Creating resources in namespace: {target_namespace}")
 
@@ -624,24 +656,20 @@ async def create_bmh_resources(spec, name, namespace, mac_address, ipmi_address,
     )
     operator_logger.info(f"[REDEPLOY] Created BareMetalHost: {name}")
 
-    # Generate and create NMStateConfig (Dell servers only with VLAN ID)
-    if server_vendor and server_vendor.upper() == "DELL" and vlan_id:
-        operator_logger.info(f"[REDEPLOY] Creating NMStateConfig for Dell server {name} with VLAN {vlan_id}")
-        nmstate_data = yaml_generator.generate_nmstate_config(
-            name, target_namespace, mac_address, infra_env, vlan_id,
-            nic_name_override=nic_name_override
-        )
-        await asyncio.to_thread(
-            OpenShiftUtils.create_nmstate_config, custom_api, target_namespace, nmstate_data, name
-        )
-        operator_logger.info(f"[REDEPLOY] Created NMStateConfig for {name}")
-    else:
-        operator_logger.debug(f"[REDEPLOY] Skipping NMStateConfig creation for {server_vendor} server")
+    # Generate and create NMStateConfig (all vendors; bonded when two NICs resolve)
+    nmstate_data = yaml_generator.generate_nmstate_config(
+        name, target_namespace, mac_addresses, nic_names, infra_env, vlan_id
+    )
+    await asyncio.to_thread(
+        OpenShiftUtils.create_nmstate_config, custom_api, target_namespace, nmstate_data, name
+    )
+    operator_logger.info(f"[REDEPLOY] Created NMStateConfig for {name}")
 
     # Update status with resource info
     patch.status["bmhName"] = name
     patch.status["bmhNamespace"] = target_namespace
     patch.status["macAddress"] = mac_address
+    patch.status["macAddresses"] = mac_addresses
     patch.status["ipmiAddress"] = ipmi_address
     patch.status["serverVendor"] = server_vendor
     if vlan_id:
@@ -654,7 +682,7 @@ async def delete_bmh(spec, name, namespace, status, **kwargs):
     Handler for deleting BareMetalHostGenerator CRDs.
 
     This handler cleans up associated resources based on DELETE_RESOURCES_ON_DELETE configuration:
-    - NMStateConfig (for Dell servers)
+    - NMStateConfig (all vendors)
     - BMC Secret
     - BareMetalHost
 
@@ -678,17 +706,15 @@ async def delete_bmh(spec, name, namespace, status, **kwargs):
         vlan_id = status.get('vlanId')
 
         try:
-            # Delete NMStateConfig if exists (Dell servers only)
-            if server_vendor and server_vendor.upper() == 'DELL':
-                nmstate_config_name = bmh_name
-                # Run blocking Kubernetes API call in thread pool
-                await asyncio.to_thread(
-                    OpenShiftUtils.delete_nmstate_config,
-                    custom_api, bmh_namespace, nmstate_config_name
-                )
-                operator_logger.info(
-                    f"Deleted NMStateConfig: {nmstate_config_name} in namespace: {bmh_namespace}"
-                )
+            # Delete NMStateConfig (created for every vendor). delete_nmstate_config()
+            # prepends "nmstate-config-", so pass the bare bmh name.
+            await asyncio.to_thread(
+                OpenShiftUtils.delete_nmstate_config,
+                custom_api, bmh_namespace, bmh_name
+            )
+            operator_logger.info(
+                f"Deleted NMStateConfig: nmstate-config-{bmh_name} in namespace: {bmh_namespace}"
+            )
 
             # Delete BMC Secret
             bmc_secret_name = f"{server_vendor.lower()}-cred-{bmh_name}" if server_vendor else f"bmc-cred-{bmh_name}"

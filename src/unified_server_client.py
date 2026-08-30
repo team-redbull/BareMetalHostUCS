@@ -30,9 +30,15 @@ class UnifiedServerClient:
                  manager_username=None, 
                  manager_password=None,
                  # Dell OME credentials
-                 ome_ip=None, 
-                 ome_username=None, 
-                 ome_password=None):
+                 ome_ip=None,
+                 ome_username=None,
+                 ome_password=None,
+                 # Cisco Intersight credentials
+                 intersight_endpoint=None,
+                 intersight_api_key_id=None,
+                 intersight_api_secret=None,
+                 intersight_bmc_username=None,
+                 intersight_bmc_password=None):
         """
         Initialize unified server client with credentials for all systems.
         
@@ -48,6 +54,11 @@ class UnifiedServerClient:
             ome_ip: Dell OpenManage Enterprise IP address
             ome_username: Dell OME username
             ome_password: Dell OME password
+            intersight_endpoint: Cisco Intersight API endpoint
+            intersight_api_key_id: Intersight API key id
+            intersight_api_secret: Intersight PEM private key (text or path)
+            intersight_bmc_username: CIMC username (for the Redfish NIC-MAC query)
+            intersight_bmc_password: CIMC password (for the Redfish NIC-MAC query)
         """
         self._credentials = {
             ServerType.HP: {
@@ -66,6 +77,15 @@ class UnifiedServerClient:
                 "ip": ome_ip,
                 "username": ome_username,
                 "password": ome_password
+            },
+            ServerType.INTERSIGHT: {
+                "endpoint": intersight_endpoint,
+                "api_key_id": intersight_api_key_id,
+                "api_secret": intersight_api_secret,
+                # CIMC creds — Intersight has no per-server MAC mapping, so the
+                # strategy reads NIC MACs from the CIMC Redfish API with these.
+                "bmc_username": intersight_bmc_username,
+                "bmc_password": intersight_bmc_password
             }
          }
         self._strategies: Dict[ServerType, ServerStrategy] = {}
@@ -84,18 +104,20 @@ class UnifiedServerClient:
                 logger.error(f"Error initializing strategy for {server_type.value}: {str(e)}")
     
     def _get_search_order(self, detected_type: ServerType, server_vendor: Optional[str] = None) -> List[ServerType]:
+        all_types = [ServerType.DELL, ServerType.CISCO, ServerType.INTERSIGHT, ServerType.HP]
         if server_vendor:
             vendor_type = self._detector.detect("", server_vendor)
-            return [vendor_type, ServerType.DELL, ServerType.CISCO, ServerType.HP]
-        
+            return [vendor_type] + [t for t in all_types if t != vendor_type]
+
         search_priority = {
-            ServerType.HP: [ServerType.HP, ServerType.CISCO, ServerType.DELL],
-            ServerType.DELL: [ServerType.DELL, ServerType.CISCO, ServerType.HP],
-            ServerType.CISCO: [ServerType.CISCO, ServerType.DELL, ServerType.HP]
+            ServerType.HP: [ServerType.HP, ServerType.CISCO, ServerType.INTERSIGHT, ServerType.DELL],
+            ServerType.DELL: [ServerType.DELL, ServerType.CISCO, ServerType.INTERSIGHT, ServerType.HP],
+            ServerType.CISCO: [ServerType.CISCO, ServerType.INTERSIGHT, ServerType.DELL, ServerType.HP],
+            ServerType.INTERSIGHT: [ServerType.INTERSIGHT, ServerType.CISCO, ServerType.DELL, ServerType.HP],
         }
-        return search_priority.get(detected_type, [ServerType.DELL, ServerType.CISCO, ServerType.HP])
+        return search_priority.get(detected_type, all_types)
     def get_server_info(self, server_name: str, server_vendor: Optional[str] = None,
-                        mac_index_override: Optional[str] = None) -> Tuple[str, str]:
+                        mac_indices: Optional[List[str]] = None) -> Tuple[List[str], str]:
         logger.info(f"Retrieving server info for: {server_name}")
         detected_type = self._detector.detect(server_name, server_vendor)
         search_order = self._get_search_order(detected_type, server_vendor)
@@ -107,16 +129,13 @@ class UnifiedServerClient:
                     continue
                 try:
                     logger.info(f"Searching in {server_type.value} system")
-                    # mac_index_override only applies to Dell; HP/Cisco strategies
-                    # have their own fixed MAC selection logic and ignore it.
-                    if server_type == ServerType.DELL:
-                        mac, ip = strategy.get_server_info(server_name, mac_index_override)
-                    else:
-                        mac, ip = strategy.get_server_info(server_name)
-                    if mac and ip:
-                        logger.info(f"Found server in {server_type.value} system with {ip},{mac}")
+                    # Every strategy now selects its NIC MAC(s) from mac_indices
+                    # (falls back to the server profile when None).
+                    macs, ip = strategy.get_server_info(server_name, mac_indices)
+                    if macs and ip:
+                        logger.info(f"Found server in {server_type.value} system with {ip}, {macs}")
                         self.disconnect()
-                        return mac, ip
+                        return macs, ip
                 except Exception as e:
                     logger.warning(f"Error searching in {server_type.value} system: {str(e)}")
                     continue
@@ -159,15 +178,24 @@ def initialize_unified_client():
     ome_ip = os.getenv("OME_IP")
     ome_username = os.getenv("OME_USERNAME")
     ome_password = os.getenv("OME_PASSWORD")
-    
+
+    intersight_endpoint = os.getenv("INTERSIGHT_API_ENDPOINT")
+    intersight_api_key_id = os.getenv("INTERSIGHT_API_KEY_ID")
+    intersight_api_secret = os.getenv("INTERSIGHT_API_SECRET")
+    intersight_bmc_username = os.getenv("INTERSIGHT_BMC_USERNAME")
+    intersight_bmc_password = os.getenv("INTERSIGHT_BMC_PASSWORD")
+
     hp_configured = all([oneview_ip, oneview_username, oneview_password])
     cisco_configured = any([ucs_central_ip and central_username and central_password,
                             manager_username and manager_password])
     dell_configured = all([ome_ip, ome_username, ome_password])
-    
-    if not any([hp_configured, cisco_configured, dell_configured]):
-        raise ValueError("No valid configuration found for HP OneView, Cisco UCS, or Dell OME.")
-    
+    intersight_configured = all([intersight_endpoint, intersight_api_key_id, intersight_api_secret])
+
+    if not any([hp_configured, cisco_configured, dell_configured, intersight_configured]):
+        raise ValueError(
+            "No valid configuration found for HP OneView, Cisco UCS, Dell OME, or Cisco Intersight."
+        )
+
     configured_systems = []
     if hp_configured:
         configured_systems.append("HP OneView")
@@ -175,9 +203,11 @@ def initialize_unified_client():
         configured_systems.append("Cisco UCS")
     if dell_configured:
         configured_systems.append("Dell OME")
-    
+    if intersight_configured:
+        configured_systems.append("Cisco Intersight")
+
     logger.info(f"Configured systems: {', '.join(configured_systems)}")
-    
+
     unified_client = UnifiedServerClient(
         oneview_ip=oneview_ip,
         oneview_username=oneview_username,
@@ -189,6 +219,11 @@ def initialize_unified_client():
         manager_password=manager_password,
         ome_ip=ome_ip,
         ome_username=ome_username,
-        ome_password=ome_password
+        ome_password=ome_password,
+        intersight_endpoint=intersight_endpoint,
+        intersight_api_key_id=intersight_api_key_id,
+        intersight_api_secret=intersight_api_secret,
+        intersight_bmc_username=intersight_bmc_username,
+        intersight_bmc_password=intersight_bmc_password
     )
     return unified_client

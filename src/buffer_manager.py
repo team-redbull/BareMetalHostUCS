@@ -10,7 +10,7 @@ from src.yaml_generators import YamlGenerator
 from src.openshift_utils import OpenShiftUtils
 from src.unified_server_client import UnifiedServerClient
 from src.config import buffer_logger, MAX_AVAILABLE_SERVERS, BUFFER_CHECK_INTERVAL, BMHGenCRD, BMHCRD, Phase
-from src.server_profile_config import resolve_nic_and_mac_index
+from src.server_profile_config import resolve_nics_and_mac_indices
 
 class BufferManager:
     def __init__(self, custom_api: client.CustomObjectsApi = None, core_v1: client.CoreV1Api = None):
@@ -170,15 +170,15 @@ class BufferManager:
         server_name = name
         self.buffer_logger.info(f"Processing buffered generator: {name}")
 
-        # Extract per-CR network config overrides (present for spec override feature)
+        # Extract per-CR network config overrides (spec.networkConfig.nicNames/macIndices)
         _nc = (bmhgen.get('spec') or {}).get('networkConfig') or {}
-        nic_name_override = _nc.get('nicName') or None
-        mac_index_override = _nc.get('macIndex') or None
-        effective_nic, effective_mac_index = resolve_nic_and_mac_index(name, nic_name_override, mac_index_override)
-        if nic_name_override:
-            self.buffer_logger.info(f"[{name}] networkConfig override: nicName={nic_name_override}, macIndex={mac_index_override}")
+        _nic_override = _nc.get('nicNames') or None
+        _idx_override = _nc.get('macIndices') or None
+        effective_nics, effective_mac_indices = resolve_nics_and_mac_indices(name, _nic_override, _idx_override)
+        if _nic_override:
+            self.buffer_logger.info(f"[{name}] networkConfig override: nicNames={effective_nics}, macIndices={effective_mac_indices}")
         else:
-            self.buffer_logger.info(f"[{name}] resolved profile: nicName={effective_nic}, macIndex={effective_mac_index}")
+            self.buffer_logger.info(f"[{name}] resolved profile: nicNames={effective_nics}, macIndices={effective_mac_indices}")
 
         # Safety check: verify this generator is still in Buffered phase
         if not await self._verify_still_buffered(namespace, name):
@@ -188,7 +188,10 @@ class BufferManager:
         try:
             # Get the stored server info from status
             status = bmhgen.get('status', {})
-            mac_address = status.get('macAddress')
+            mac_addresses = status.get('macAddresses') or (
+                [status.get('macAddress')] if status.get('macAddress') else []
+            )
+            mac_address = mac_addresses[0] if mac_addresses else None
             ipmi_address = status.get('ipmiAddress')
             server_vendor = status.get('serverVendor')
 
@@ -206,12 +209,14 @@ class BufferManager:
                     server_name = spec.get('serverName', name)
                     # Run blocking network call in thread pool
                     loop = asyncio.get_event_loop()
-                    mac_address, ipmi_address = await loop.run_in_executor(
+                    mac_addresses, ipmi_address = await loop.run_in_executor(
                         None,
-                        lambda: unified_client.get_server_info(server_name, server_vendor, mac_index_override)
+                        lambda: unified_client.get_server_info(server_name, server_vendor, effective_mac_indices)
                     )
+                    mac_address = mac_addresses[0] if mac_addresses else None
                     status_update = {
                         "macAddress": mac_address,
+                        "macAddresses": mac_addresses,
                         "ipmiAddress": ipmi_address
                     }
                     # Run blocking Kubernetes API call in thread pool
@@ -265,11 +270,12 @@ class BufferManager:
                     "bmhName": name,
                     "bmhNamespace": target_namespace,
                     "macAddress": mac_address,
+                    "macAddresses": mac_addresses,
                     "ipmiAddress": ipmi_address,
                     "serverVendor": server_vendor,
                     "vlanId": vlan_id,
-                    "selectedNicName": effective_nic,
-                    "selectedMacIndex": effective_mac_index,
+                    "selectedNicNames": effective_nics,
+                    "selectedMacIndices": effective_mac_indices,
                 }
                 # Run blocking Kubernetes API call in thread pool
                 loop = asyncio.get_event_loop()
@@ -320,21 +326,22 @@ class BufferManager:
             )
             self.buffer_logger.info(f"Created BareMetalHost: {name}")
 
-            # Create NMStateConfig for Dell servers
-            if server_vendor and server_vendor.upper() == 'DELL' and vlan_id:
-                nmstate_config = yaml_generator.generate_nmstate_config(
-                    name=server_name,
-                    namespace=target_namespace,
-                    macAddress=mac_address,
-                    infra_env=infra_env,
-                    vlanId=vlan_id,
-                    nic_name_override=nic_name_override
-                )
-                # Run blocking Kubernetes API call in thread pool
-                await loop.run_in_executor(
-                    None,
-                    lambda: OpenShiftUtils.create_nmstate_config(self.custom_api, target_namespace, nmstate_config, server_name)
-                )
+            # Create NMStateConfig for every vendor (bonded when two NICs resolve)
+            if not vlan_id:
+                raise ValueError(f"spec.networkConfig.vlanId is required for {name}")
+            nmstate_config = yaml_generator.generate_nmstate_config(
+                name=server_name,
+                namespace=target_namespace,
+                mac_addresses=mac_addresses,
+                nic_names=effective_nics,
+                infra_env=infra_env,
+                vlanId=vlan_id,
+            )
+            # Run blocking Kubernetes API call in thread pool
+            await loop.run_in_executor(
+                None,
+                lambda: OpenShiftUtils.create_nmstate_config(self.custom_api, target_namespace, nmstate_config, server_name)
+            )
 
             # Update generator status to Completed
             completed_status = {
@@ -343,11 +350,12 @@ class BufferManager:
                 "bmhName": name,
                 "bmhNamespace": target_namespace,
                 "macAddress": mac_address,
+                "macAddresses": mac_addresses,
                 "ipmiAddress": ipmi_address,
                 "serverVendor": server_vendor,
                 "vlanId": vlan_id,
-                "selectedNicName": effective_nic,
-                "selectedMacIndex": effective_mac_index,
+                "selectedNicNames": effective_nics,
+                "selectedMacIndices": effective_mac_indices,
             }
 
             # CRITICAL: Update status to Completed - this must succeed to prevent re-processing
@@ -442,10 +450,12 @@ class BufferManager:
     async def is_to_buffer(
         self,
         server_name: str,
-        mac_address: str,
+        mac_addresses: List[str],
         ipmi_address: str,
         server_vendor: str,
         vlan_id: str,
+        nic_names: List[str],
+        mac_indices: List[str],
         namespace: str,
         name: str
     ) -> bool:
@@ -467,10 +477,13 @@ class BufferManager:
                         "phase": Phase.BUFFERED,
                         "message": f"Server buffered (available: {available_count}/{self.MAX_AVAILABLE_SERVERS})",
                         "bufferedAt": datetime.utcnow().isoformat() + "Z",
-                        "macAddress": mac_address,
+                        "macAddress": mac_addresses[0] if mac_addresses else None,
+                        "macAddresses": mac_addresses,
                         "ipmiAddress": ipmi_address,
                         "serverVendor": server_vendor,
-                        "vlanId": vlan_id
+                        "vlanId": vlan_id,
+                        "selectedNicNames": nic_names,
+                        "selectedMacIndices": mac_indices,
                     }
                     # Run blocking Kubernetes API call in thread pool
                     loop = asyncio.get_event_loop()

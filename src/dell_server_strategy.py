@@ -2,13 +2,13 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Tuple, Dict, Type
+from typing import Optional, Tuple, Dict, Type, List
 import requests
 from urllib3 import disable_warnings
 from urllib3.exceptions import InsecureRequestWarning
 from src.server_strategy import ServerStrategy
 from src.config import dell_strategy_logger
-from src.server_profile_config import lookup_profile
+from src.server_profile_config import resolve_nics_and_mac_indices
 
 disable_warnings(InsecureRequestWarning)
 logger = dell_strategy_logger
@@ -81,8 +81,14 @@ class DellServerStrategy(ServerStrategy):
             self._session.headers.update({"X-Auth-Token": self._auth_token})
             logger.info(f"Successfully connected to Dell OME (Session ID: {self._session_id})")
     
-    def get_server_info(self, server_name: str, mac_index_override: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    def get_server_info(
+        self, server_name: str, mac_indices: Optional[List[str]] = None
+    ) -> Tuple[List[str], Optional[str]]:
         self.ensure_connected()
+
+        # Resolve which NIC MACs to fetch (spec/profile) before querying inventory.
+        if not mac_indices:
+            _, mac_indices = resolve_nics_and_mac_indices(server_name)
 
         device_url = f"{self.base_url}/ProfileService/Profiles"
         skip = 0
@@ -112,28 +118,30 @@ class DellServerStrategy(ServerStrategy):
 
                     if not idrac_ip:
                         logger.error(f"TargetName (iDRAC IP) is missing for server: {server_name}")
-                        return None, None
+                        return [], None
 
                     logger.debug(f"iDRAC IP for {server_name}: {idrac_ip}")
-                    mac_address = self._get_dell_mac_address(idrac_ip, server_name, mac_index_override)
+                    mac_addresses = self._get_dell_mac_addresses(idrac_ip, server_name, mac_indices)
 
-                    if not mac_address:
-                        logger.error(f"Failed to retrieve MAC address for server: {server_name}")
-                        return None, None
+                    if not mac_addresses:
+                        logger.error(f"Failed to retrieve MAC address(es) for server: {server_name}")
+                        return [], None
 
-                    logger.info(f"Successfully retrieved server info - MAC: {mac_address}, iDRAC: {idrac_ip}")
-                    return mac_address, idrac_ip
+                    logger.info(f"Successfully retrieved server info - MACs: {mac_addresses}, iDRAC: {idrac_ip}")
+                    return mac_addresses, idrac_ip
 
             # Check if we've reached the end of pagination
             if len(dell_servers) < top:
                 total_checked = skip + len(dell_servers)
                 logger.error(f"Server profile '{server_name}' not found in Dell OME after checking {total_checked} profiles. ")
-                return None, None
+                return [], None
 
             skip += top
             logger.debug(f"No match found in this batch, fetching next {top} profiles...")
             
-    def _get_dell_mac_address(self, idrac_ip: str, server_name: str, mac_index_override: Optional[str] = None) -> Optional[str]:
+    def _get_dell_mac_addresses(
+        self, idrac_ip: str, server_name: str, mac_indices: List[str]
+    ) -> List[str]:
         self.ensure_connected()
         device_url = f"{self.base_url}/DeviceService/Devices"
         skip = 0
@@ -168,13 +176,22 @@ class DellServerStrategy(ServerStrategy):
                 logger.info(f"Network interfaces found: {len(network_interfaces)} for device {device_id}")
 
                 if network_interfaces:
-                    mac_address = self._extract_mac_by_server_type(network_interfaces, server_name, device_id, mac_index_override)
-                    if mac_address:
-                        logger.info(f"MAC address found for server {server_name}: {mac_address}")
-                        return mac_address
+                    macs: List[str] = []
+                    for mac_index in mac_indices:
+                        mac_address = self._extract_one_mac(network_interfaces, mac_index, server_name, device_id)
+                        if not mac_address:
+                            logger.error(
+                                f"Failed to extract MAC at index {mac_index!r} for server "
+                                f"{server_name} (device {device_id})"
+                            )
+                            return []
+                        macs.append(mac_address)
+                    if macs:
+                        logger.info(f"MAC addresses found for server {server_name}: {macs}")
+                        return macs
 
                 logger.error(f"No network interfaces or failed to extract MAC for device {device_id}")
-                return None
+                return []
 
             # Check if we've reached the end of pagination
             if len(devices) < top:
@@ -184,37 +201,22 @@ class DellServerStrategy(ServerStrategy):
             skip += top
             logger.debug(f"No match found in this batch, fetching next {top} devices...")
 
-        return None
+        return []
 
-    def _extract_mac_by_server_type(self, network_interfaces: list, server_name: str, device_id: int,
-                                     mac_index_override: Optional[str] = None) -> Optional[str]:
+    def _extract_one_mac(self, network_interfaces: list, mac_index: str, server_name: str,
+                         device_id: int) -> Optional[str]:
         """
-        Extract MAC address based on server type.
+        Extract a single MAC address from the Dell inventory for one mac_index.
 
-        Server types:
-        - H100/H200: Uses 3rd network interface (index 2)
-        - Data servers: Uses last interface, last port, last partition
-        - Default: Uses first interface, first port, first partition
+        mac_index semantics (preserved from the original per-server-type logic):
+        - "first": first interface, first port, first partition
+        - "last":  last interface, last port, last partition
+        - integer N (e.g. "2" for H100/H200): interface N, first port, first partition
 
-        Args:
-            network_interfaces: List of network interfaces from Dell OME
-            server_name: Name of the server (used for type detection)
-            device_id: Device ID for logging
-
-        Returns:
-            MAC address string or None if extraction fails
+        Returns the MAC string, or None if extraction fails.
         """
         try:
-            if mac_index_override:
-                mac_index = mac_index_override
-                logger.info(f"Server '{server_name}' mac_index='{mac_index}' (spec override)")
-            else:
-                profile = lookup_profile(server_name)
-                mac_index = profile.get("mac_index", "first")
-                logger.info(
-                    f"Server '{server_name}' mac_index='{mac_index}' "
-                    f"(pattern: {profile.get('pattern', 'default')})"
-                )
+            logger.info(f"Server '{server_name}' extracting mac_index='{mac_index}'")
 
             if mac_index == "first":
                 iface = network_interfaces[0]
